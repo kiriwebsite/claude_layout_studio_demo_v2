@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Layout Studio — SSD 自動切版</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Layout Studio</h1>
+    <p class="subtitle">用 Sum of Squared Differences 把素材依示意圖自動定位成 Grid 切版</p>
+  </header>
+
+  <main class="hero">
+    <button id="openModalBtn" class="primary-btn">＋ 開始建立切版</button>
+    <p class="hint">點擊後上傳「示意圖」與含有 <code>bg.png</code> 的素材資料夾</p>
+  </main>
+
+  <!-- ===== Modal ===== -->
+  <div id="modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>建立切版</h2>
+        <button id="closeModalBtn" class="icon-btn" aria-label="關閉">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="uploads">
+          <label class="upload-card">
+            <span class="upload-title">① 示意圖</span>
+            <span class="upload-desc">整體版面長相（layout reference）</span>
+            <input type="file" id="refInput" accept="image/*" />
+            <span class="file-name" id="refName">未選擇</span>
+          </label>
+
+          <label class="upload-card">
+            <span class="upload-title">② 素材資料夾</span>
+            <span class="upload-desc">需包含 bg.png 底圖與要擺放的圖片</span>
+            <input type="file" id="folderInput" webkitdirectory directory multiple />
+            <span class="fallback">Firefox 不支援資料夾?改
+              <label class="link">選多張圖片<input type="file" id="filesInput" accept="image/*" multiple hidden /></label>
+              (記得含 bg.png)
+            </span>
+            <span class="file-name" id="folderName">未選擇</span>
+          </label>
+        </div>
+
+        <div class="controls">
+          <button id="autoPlaceBtn" class="primary-btn small" disabled>SSD 自動定位</button>
+          <span class="ctrl-hint">定位後可在畫布上自由拖曳微調（像素精準，可重疊）</span>
+          <span id="status" class="status"></span>
+        </div>
+
+        <div class="stage">
+          <div class="canvas-wrap">
+            <canvas id="canvas"></canvas>
+          </div>
+          <aside class="layers">
+            <h3>素材</h3>
+            <ul id="layerList" class="layer-list"></ul>
+          </aside>
+        </div>
+      </div>
+
+      <div class="modal-foot">
+        <span class="foot-hint">可在畫布上拖曳微調位置，確認後再下載</span>
+        <span id="saveStatus" class="save-status"></span>
+        <button id="resetBtn" class="ghost-btn" title="清空示意圖、素材與畫布，並刪除自動存檔">↺ 重新開始</button>
+        <button id="downloadBtn" class="success-btn" disabled>⬇ 下載切版 (HTML / CSS / JS)</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
