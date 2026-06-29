@@ -12,7 +12,6 @@
 const el = (id) => document.getElementById(id);
 
 // ---- DOM ----
-const modal = el("modal");
 const refInput = el("refInput");
 const folderInput = el("folderInput");
 const filesInput = el("filesInput");
@@ -26,6 +25,9 @@ const autoPlaceBtn = el("autoPlaceBtn");
 const downloadBtn = el("downloadBtn");
 const saveStatus = el("saveStatus");
 const resetBtn = el("resetBtn");
+const showRefToggle = el("showRefToggle");
+const assetOpacitySlider = el("assetOpacity");
+const assetOpacityVal = el("assetOpacityVal");
 
 // Cap source images so huge uploads don't blow up memory / crash the tab.
 const MAX_DIM = 1600;
@@ -43,11 +45,13 @@ const state = {
 };
 
 // ============================================================
-// Modal open / close
+// View controls: reference overlay + asset opacity (for aligning)
 // ============================================================
-el("openModalBtn").addEventListener("click", () => modal.classList.remove("hidden"));
-el("closeModalBtn").addEventListener("click", () => modal.classList.add("hidden"));
-modal.addEventListener("mousedown", (e) => { if (e.target === modal) modal.classList.add("hidden"); });
+showRefToggle.addEventListener("change", draw);
+assetOpacitySlider.addEventListener("input", () => {
+  assetOpacityVal.textContent = assetOpacitySlider.value + "%";
+  draw();
+});
 
 // ============================================================
 // File loading helpers
@@ -86,9 +90,14 @@ refInput.addEventListener("change", async () => {
   const f = refInput.files[0];
   if (!f) return;
   refName.textContent = f.name;
-  const norm = await normalizeImage(f);
+  // Keep the reference at high resolution (same cap as bg) so it stays crisp
+  // on the canvas — the default MAX_DIM would over-shrink a tall mock-up.
+  const norm = await normalizeImage(f, 6000);
   state.refImg = norm.img;
   state.refBlob = norm.blob;
+  // Show the reference on the canvas immediately, even before a bg is chosen.
+  setupCanvas();
+  draw();
   tryEnableAutoPlace();
   saveSession();
 });
@@ -153,30 +162,48 @@ function defaultLayout() {
 // ============================================================
 // Canvas setup & drawing
 // ============================================================
+// The canvas coordinate space = the bg/design space if a bg is loaded,
+// otherwise the reference image's own size (so the reference can preview
+// before any bg is chosen).
+function currentDims() {
+  if (state.bg) return { W: state.layoutW, H: state.layoutH };
+  if (state.refImg) return { W: state.refImg.width, H: state.refImg.height };
+  return null;
+}
+
 function setupCanvas() {
-  const maxDispW = 760;
-  const maxDispH = 540;
-  const aspect = state.layoutH / state.layoutW;
-  if (aspect > maxDispH / maxDispW) {
-    // Tall page (e.g. a long mobile layout): fit to width, scroll vertically.
-    state.scale = Math.min(maxDispW / state.layoutW, 1);
-  } else {
-    state.scale = Math.min(maxDispW / state.layoutW, maxDispH / state.layoutH, 1);
-  }
-  canvas.width = Math.round(state.layoutW * state.scale);
-  canvas.height = Math.round(state.layoutH * state.scale);
+  const d = currentDims();
+  if (!d) { canvas.width = 0; canvas.height = 0; return; }
+  // Fit the canvas bitmap to a sane width; CSS scales it to the column and the
+  // page's own scrollbar handles tall layouts (no inner canvas scroll).
+  const maxBitmapW = 1280;
+  state.scale = Math.min(maxBitmapW / d.W, 1);
+  canvas.width = Math.round(d.W * state.scale);
+  canvas.height = Math.round(d.H * state.scale);
 }
 
 function draw() {
-  if (!state.bg) return;
+  const d = currentDims();
+  if (!d) { ctx.clearRect(0, 0, canvas.width, canvas.height); return; }
   const s = state.scale;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(state.bg.img, 0, 0, canvas.width, canvas.height);
+
+  // Backdrop: bg.png if present.
+  if (state.bg) ctx.drawImage(state.bg.img, 0, 0, canvas.width, canvas.height);
+
+  // Reference overlay — stays visible through and after SSD for comparison.
+  if (showRefToggle.checked && state.refImg) {
+    ctx.drawImage(state.refImg, 0, 0, canvas.width, canvas.height);
+  }
 
   // Assets — array order is back-to-front; hidden ones are skipped.
+  // Drawn at the chosen opacity so you can see the reference underneath.
+  const opacity = (parseInt(assetOpacitySlider.value, 10) || 100) / 100;
   state.assets.forEach((a, i) => {
     if (a.visible === false) return;
+    ctx.globalAlpha = opacity;
     ctx.drawImage(a.img, a.x * s, a.y * s, a.w * s, a.h * s);
+    ctx.globalAlpha = 1;
     ctx.strokeStyle = state.drag && state.drag.idx === i ? "#38d090" : "rgba(91,140,255,0.8)";
     ctx.lineWidth = 1.5;
     ctx.strokeRect(a.x * s + 0.5, a.y * s + 0.5, a.w * s, a.h * s);
@@ -202,12 +229,14 @@ const MATCH_COARSE = 120;   // coarse pyramid width
 const MATCH_FINE = 360;     // fine pyramid width
 const TOPK = 12;            // candidates carried from coarse to fine
 
+// Reuse one scratch canvas — matching calls this thousands of times.
+const _scaleCanvas = document.createElement("canvas");
+const _scaleCtx = _scaleCanvas.getContext("2d", { willReadFrequently: true });
 function getScaledData(img, w, h) {
-  const c = document.createElement("canvas");
-  c.width = w; c.height = h;
-  const cx = c.getContext("2d");
-  cx.drawImage(img, 0, 0, w, h);
-  return cx.getImageData(0, 0, w, h);
+  _scaleCanvas.width = w; _scaleCanvas.height = h;
+  _scaleCtx.clearRect(0, 0, w, h);
+  _scaleCtx.drawImage(img, 0, 0, w, h);
+  return _scaleCtx.getImageData(0, 0, w, h);
 }
 
 // Full dense SSD score map of a template over a reference (no early exit).
@@ -275,58 +304,61 @@ function scanWindow(rd, refW, td, tmW, tmH, xs, xe, ys, ye, initBest) {
   return { x: bx, y: by, score: best };
 }
 
+// Build a reusable pyramid context for the SSD fallback search.
+function buildPyramidCtx() {
+  const designW = state.layoutW, designH = state.layoutH;
+  const fc = Math.min(MATCH_COARSE, designW) / designW;
+  const ff = Math.min(MATCH_FINE, designW) / designW;
+  const cW = Math.round(designW * fc), cH = Math.round(designH * fc);
+  const fW = Math.round(designW * ff), fH = Math.round(designH * ff);
+  return {
+    designW, designH, fc, ff, cW, cH, fW, fH,
+    refCoarse: getScaledData(state.refImg, cW, cH).data,
+    refFine: getScaledData(state.refImg, fW, fH).data,
+    ratio: ff / fc, pad: Math.ceil(ff / fc) + 3,
+  };
+}
+
+// SSD pyramid + top-K match for a single asset (the fallback path).
+function pyramidMatchAsset(a, p) {
+  let dispW = Math.min(a.nativeW, p.designW);
+  let dispH = a.nativeH * (dispW / a.nativeW);
+  if (dispH > p.designH) { dispH = p.designH; dispW = a.nativeW * (dispH / a.nativeH); }
+
+  const ctw = Math.max(2, Math.round(dispW * p.fc));
+  const cth = Math.max(2, Math.round(dispH * p.fc));
+  const ctd = getScaledData(a.img, ctw, cth).data;
+  const { map, W, H } = ssdMap(p.refCoarse, p.cW, p.cH, ctd, ctw, cth);
+  const cands = topKCandidates(map, W, H, TOPK, Math.ceil(ctw / 2), Math.ceil(cth / 2));
+
+  const ftw = Math.max(2, Math.round(dispW * p.ff));
+  const fth = Math.max(2, Math.round(dispH * p.ff));
+  const ftd = getScaledData(a.img, ftw, fth).data;
+  let best = { x: 0, y: 0, score: Infinity };
+  for (const c of cands) {
+    const cx = Math.round(c.x * p.ratio), cy = Math.round(c.y * p.ratio);
+    const x0 = Math.max(0, cx - p.pad), x1 = Math.min(p.fW - ftw, cx + p.pad);
+    const y0 = Math.max(0, cy - p.pad), y1 = Math.min(p.fH - fth, cy + p.pad);
+    if (x1 < x0 || y1 < y0) continue;
+    const m = scanWindow(p.refFine, p.fW, ftd, ftw, fth, x0, x1, y0, y1, best.score);
+    if (m.score < best.score) best = m;
+  }
+  a.w = dispW; a.h = dispH;
+  if (best.score !== Infinity) { a.x = best.x / p.ff; a.y = best.y / p.ff; }
+  a.score = best.score === Infinity ? null : best.score;
+}
+
 autoPlaceBtn.addEventListener("click", async () => {
   autoPlaceBtn.disabled = true;
   statusEl.textContent = "分析示意圖中…";
   await new Promise((r) => setTimeout(r, 30));
 
   try {
-    const designW = state.layoutW, designH = state.layoutH;
-    const fc = Math.min(MATCH_COARSE, designW) / designW;   // design -> coarse
-    const ff = Math.min(MATCH_FINE, designW) / designW;     // design -> fine
-    const cW = Math.round(designW * fc), cH = Math.round(designH * fc);
-    const fW = Math.round(designW * ff), fH = Math.round(designH * ff);
-    const refCoarse = getScaledData(state.refImg, cW, cH).data;
-    const refFine = getScaledData(state.refImg, fW, fH).data;
-    const ratio = ff / fc;            // coarse px -> fine px
-    const pad = Math.ceil(ratio) + 3; // fine-search window half-size
-
+    const pctx = buildPyramidCtx();
     for (let i = 0; i < state.assets.length; i++) {
-      const a = state.assets[i];
-      statusEl.textContent = `SSD 比對 (${i + 1}/${state.assets.length}) ${a.name}`;
+      statusEl.textContent = `SSD 比對 (${i + 1}/${state.assets.length}) ${state.assets[i].name}`;
       await new Promise((r) => setTimeout(r, 0));   // yield so the UI stays alive
-
-      // Displayed size in design space = native size, clamped to the layout.
-      let dispW = Math.min(a.nativeW, designW);
-      let dispH = a.nativeH * (dispW / a.nativeW);
-      if (dispH > designH) { dispH = designH; dispW = a.nativeW * (dispH / a.nativeH); }
-
-      // Coarse pass: full map + top-K candidates.
-      const ctw = Math.max(2, Math.round(dispW * fc));
-      const cth = Math.max(2, Math.round(dispH * fc));
-      const ctd = getScaledData(a.img, ctw, cth).data;
-      const { map, W, H } = ssdMap(refCoarse, cW, cH, ctd, ctw, cth);
-      const cands = topKCandidates(map, W, H, TOPK, Math.ceil(ctw / 2), Math.ceil(cth / 2));
-
-      // Fine pass: refine each candidate in a small window, keep global best.
-      const ftw = Math.max(2, Math.round(dispW * ff));
-      const fth = Math.max(2, Math.round(dispH * ff));
-      const ftd = getScaledData(a.img, ftw, fth).data;
-      let best = { x: 0, y: 0, score: Infinity };
-      for (const c of cands) {
-        const cx = Math.round(c.x * ratio), cy = Math.round(c.y * ratio);
-        const x0 = Math.max(0, cx - pad), x1 = Math.min(fW - ftw, cx + pad);
-        const y0 = Math.max(0, cy - pad), y1 = Math.min(fH - fth, cy + pad);
-        if (x1 < x0 || y1 < y0) continue;
-        const m = scanWindow(refFine, fW, ftd, ftw, fth, x0, x1, y0, y1, best.score);
-        if (m.score < best.score) best = m;
-      }
-
-      a.w = dispW;
-      a.h = dispH;
-      a.x = best.score === Infinity ? a.x : best.x / ff;
-      a.y = best.score === Infinity ? a.y : best.y / ff;
-      a.score = best.score;
+      pyramidMatchAsset(state.assets[i], pctx);
     }
 
     statusEl.textContent = "✓ 定位完成，可拖曳微調";
@@ -759,10 +791,11 @@ async function restoreSession() {
 
     if (state.bg) {
       folderName.textContent = `bg.png + ${state.assets.length} 張素材（已還原）`;
-      setupCanvas();
       renderLayerList();
-      draw();
     }
+    if (state.refImg && record.refNameTxt) refName.textContent = record.refNameTxt;
+    // Draw whatever we have (bg+assets, or reference-only preview).
+    if (state.bg || state.refImg) { setupCanvas(); draw(); }
     tryEnableAutoPlace();
     saveStatus.textContent = "✓ 已還原上次工作進度";
   } catch (err) {
@@ -786,6 +819,8 @@ resetBtn.addEventListener("click", async () => {
   layerList.innerHTML = "";
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   canvas.width = 0; canvas.height = 0;
+  showRefToggle.checked = true;
+  assetOpacitySlider.value = 100; assetOpacityVal.textContent = "100%";
   autoPlaceBtn.disabled = true;
   downloadBtn.disabled = true;
 

@@ -28,15 +28,14 @@ body {
 .topbar h1 { margin: 0; font-size: 28px; letter-spacing: .5px; }
 .subtitle { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
 
-.hero {
+/* Inline wide app layout (no modal) */
+.app {
+  width: min(1440px, 88vw);
+  margin: 14px auto 40px;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  margin-top: 14vh;
+  gap: 16px;
 }
-.hint { color: var(--muted); font-size: 13px; }
-.hint code { background: var(--panel-2); padding: 2px 6px; border-radius: 5px; color: var(--accent); }
 
 /* Buttons */
 .primary-btn {
@@ -73,33 +72,14 @@ body {
 .icon-btn:hover { background: var(--panel-2); color: var(--text); }
 
 /* Modal */
-.modal-overlay {
-  position: fixed; inset: 0;
-  background: rgba(5,7,16,.72);
-  backdrop-filter: blur(4px);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 50;
-}
-.modal-overlay.hidden { display: none; }
-
-.modal {
-  width: min(1180px, 95vw);
-  height: min(860px, 92vh);
+/* Action bar (formerly modal footer) */
+.actionbar {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 16px;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 16px;
-  display: flex; flex-direction: column;
-  overflow: hidden;
-  box-shadow: 0 30px 80px rgba(0,0,0,.5);
+  border-radius: 12px;
 }
-.modal-head, .modal-foot {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 14px;
-  padding: 16px 22px;
-  border-bottom: 1px solid var(--line);
-}
-.modal-foot { border-bottom: none; border-top: 1px solid var(--line); }
-.modal-head h2 { margin: 0; font-size: 18px; }
 .foot-hint { color: var(--muted); font-size: 13px; }
 .save-status { color: var(--success); font-size: 12px; margin-left: auto; }
 .ghost-btn {
@@ -108,12 +88,6 @@ body {
   padding: 8px 12px; cursor: pointer; font-size: 13px;
 }
 .ghost-btn:hover { color: var(--danger); border-color: var(--danger); }
-
-.modal-body {
-  padding: 18px 22px;
-  display: flex; flex-direction: column; gap: 16px;
-  overflow: auto; flex: 1;
-}
 
 /* Uploads */
 .uploads { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
@@ -153,26 +127,31 @@ body {
 .fallback .link { color: var(--accent); text-decoration: underline; cursor: pointer; }
 .fallback .link:hover { color: #9db8ff; }
 
-/* Controls */
+/* Controls — stick to the top so they stay reachable while scrolling tall canvases. */
 .controls {
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
   background: var(--panel-2); border: 1px solid var(--line);
   border-radius: 10px; padding: 10px 14px;
+  position: sticky; top: 8px; z-index: 20;
 }
 .controls label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
 .controls input[type=number] {
   width: 64px; background: var(--bg); color: var(--text);
   border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px;
 }
-.controls .check { gap: 6px; }
+.controls .check { gap: 8px; font-size: 14px; cursor: pointer; }
+.controls .check input[type=checkbox] {
+  width: 20px; height: 20px; accent-color: var(--accent); cursor: pointer;
+}
+.controls .slider { gap: 8px; }
+.controls .slider input[type=range] { width: 120px; accent-color: var(--accent); cursor: pointer; }
+.controls #assetOpacityVal { color: var(--accent); min-width: 38px; }
 .ctrl-hint { color: var(--muted); font-size: 12px; }
 .status { color: var(--accent); font-size: 13px; margin-left: auto; }
 
 /* Stage */
-.stage { display: grid; grid-template-columns: 1fr 220px; gap: 14px; min-height: 380px; }
+.stage { display: grid; grid-template-columns: 260px 1fr; gap: 14px; align-items: start; }
 .canvas-wrap {
-  max-height: 560px;
-  overflow: auto;
   background:
     linear-gradient(45deg, #15192b 25%, transparent 25%) 0 0/24px 24px,
     linear-gradient(-45deg, #15192b 25%, transparent 25%) 0 12px/24px 24px,
@@ -184,10 +163,18 @@ body {
   display: flex; align-items: flex-start; justify-content: center;
   padding: 10px;
 }
-canvas { border-radius: 6px; cursor: grab; }
+/* Canvas scales to the column width; the page's own scrollbar scrolls tall layouts. */
+canvas { max-width: 100%; height: auto; border-radius: 6px; cursor: grab; }
 canvas:active { cursor: grabbing; }
 
-.layers { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px; overflow: auto; }
+/* Layers panel: fixed height, sticks in view, scrolls on its own. */
+.layers {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px;
+  padding: 12px;
+  position: sticky; top: 78px;          /* clear the sticky controls bar above */
+  max-height: calc(100vh - 94px);
+  overflow: auto;
+}
 .layers h3 { margin: 0 0 10px; font-size: 14px; }
 .layer-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .layer-item {
