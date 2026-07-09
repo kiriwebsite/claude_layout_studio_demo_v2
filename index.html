@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Layout Studio — SSD 自動切版</title>
+  <title>Layout Studio — SSIM 自動切版</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="topbar">
     <h1>Layout Studio</h1>
-    <p class="subtitle">用 Sum of Squared Differences 把素材依示意圖自動定位成切版</p>
+    <p class="subtitle">用 SSIM（Structural Similarity）把素材依示意圖自動定位成切版</p>
   </header>
 
   <main class="app">
@@ -34,7 +34,7 @@
     </section>
 
     <div class="controls">
-      <button id="autoPlaceBtn" class="primary-btn small" disabled>SSD 自動定位</button>
+      <button id="autoPlaceBtn" class="primary-btn small" disabled>SSIM 自動定位</button>
       <label class="check"><input type="checkbox" id="showRefToggle" checked /> 顯示示意圖</label>
       <label class="slider">素材透明度
         <input type="range" id="assetOpacity" min="20" max="100" value="100" />

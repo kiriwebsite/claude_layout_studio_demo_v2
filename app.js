@@ -3,7 +3,7 @@
 /* ============================================================
    Layout Studio
    - Upload a reference mock-up (示意圖) + an asset folder (含 bg.png)
-   - Use Sum of Squared Differences (SSD) template matching to find
+   - Use SSIM (Structural Similarity) template matching to find
      where each asset belongs inside the reference layout
    - Snap to a CSS grid, let the user drag to fine-tune
    - Export a self-contained HTML / CSS / JS slice
@@ -67,7 +67,7 @@ function loadImage(src) {
 
 // Load a blob into an Image. Anything over `maxDim` on its longest side is
 // downscaled so big uploads can't exhaust memory / crash the tab. We ALSO
-// return nativeW/nativeH — the original pixel size — because SSD matching
+// return nativeW/nativeH — the original pixel size — because SSIM matching
 // needs every asset and the bg to share one coordinate system (the design
 // space). Downscaling the stored copy is fine; matching uses nativeW/H.
 async function normalizeImage(srcBlob, maxDim = MAX_DIM) {
@@ -131,7 +131,7 @@ async function processAssetFiles(fileList) {
   state.layoutW = state.bg.nativeW;
   state.layoutH = state.bg.nativeH;
 
-  // Default: stack assets in a tidy column so the canvas is usable before SSD runs.
+  // Default: stack assets in a tidy column so the canvas is usable before SSIM runs.
   defaultLayout();
   setupCanvas();
   renderLayerList();
@@ -191,7 +191,7 @@ function draw() {
   // Backdrop: bg.png if present.
   if (state.bg) ctx.drawImage(state.bg.img, 0, 0, canvas.width, canvas.height);
 
-  // Reference overlay — stays visible through and after SSD for comparison.
+  // Reference overlay — stays visible through and after SSIM for comparison.
   if (showRefToggle.checked && state.refImg) {
     ctx.drawImage(state.refImg, 0, 0, canvas.width, canvas.height);
   }
@@ -212,12 +212,12 @@ function draw() {
 
 
 // ============================================================
-// SSD Template Matching  (multi-resolution pyramid + top-K)
+// SSIM Template Matching  (multi-resolution pyramid + top-K)
 // ----------------------------------------------------------
-// A naive single full-resolution sliding-window SSD over an 80-asset,
+// A naive single full-resolution sliding-window SSIM over an 80-asset,
 // 1197x4490 design takes ~70s and freezes the tab. A coarse spatial
-// stride is fast but unreliable: SSD is sharp, so when the true spot
-// sits between grid points another better-aligned region can win.
+// stride is fast but unreliable: the SSIM peak is sharp, so when the true
+// spot sits between grid points another better-aligned region can win.
 //
 // Instead we use an image pyramid. We search the WHOLE reference at a
 // small "coarse" resolution (stride 1 → no aliasing), keep the top-K
@@ -239,72 +239,118 @@ function getScaledData(img, w, h) {
   return _scaleCtx.getImageData(0, 0, w, h);
 }
 
-// Full dense SSD score map of a template over a reference (no early exit).
-function ssdMap(rd, refW, refH, td, tmW, tmH) {
+// Full dense SSIM score map of a template over a reference (higher = better, range ~[-1,1]).
+const C1 = 6.5025, C2 = 58.5225; // (0.01*255)^2, (0.03*255)^2
+function ssimMap(rd, refW, refH, td, tmW, tmH) {
   const W = refW - tmW + 1, H = refH - tmH + 1;
-  if (W <= 0 || H <= 0) return { map: new Float64Array(1).fill(Infinity), W: 1, H: 1 };
+  if (W <= 0 || H <= 0) return { map: new Float64Array(1).fill(-1), W: 1, H: 1 };
+
+  // Precompute template mean & variance per channel (reused for every window position).
+  let sumT = [0, 0, 0], sumT2 = [0, 0, 0], nOpaque = 0;
+  for (let ty = 0; ty < tmH; ty++) {
+    for (let tx = 0; tx < tmW; tx++) {
+      const ti = (ty * tmW + tx) * 4;
+      if (td[ti + 3] < 24) continue;
+      nOpaque++;
+      for (let c = 0; c < 3; c++) { sumT[c] += td[ti + c]; sumT2[c] += td[ti + c] * td[ti + c]; }
+    }
+  }
+  if (nOpaque === 0) return { map: new Float64Array(W * H).fill(-1), W, H };
+  const muT = sumT.map(s => s / nOpaque);
+  const sigT2 = sumT2.map((s, c) => s / nOpaque - muT[c] * muT[c]);
+
   const map = new Float64Array(W * H);
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
-      let s = 0;
-      for (let ty = 0; ty < tmH; ty++) {
-        const ryB = (y + ty) * refW, tyB = ty * tmW;
-        for (let tx = 0; tx < tmW; tx++) {
-          const ti = (tyB + tx) * 4;
-          if (td[ti + 3] < 24) continue;     // skip transparent template pixels
-          const ri = (ryB + (x + tx)) * 4;
-          const dr = rd[ri] - td[ti], dg = rd[ri + 1] - td[ti + 1], db = rd[ri + 2] - td[ti + 2];
-          s += dr * dr + dg * dg + db * db;
+      let ssimSum = 0;
+      for (let c = 0; c < 3; c++) {
+        let sumR = 0, sumR2 = 0, sumTR = 0, n = 0;
+        for (let ty = 0; ty < tmH; ty++) {
+          const ryB = (y + ty) * refW, tyB = ty * tmW;
+          for (let tx = 0; tx < tmW; tx++) {
+            const ti = (tyB + tx) * 4;
+            if (td[ti + 3] < 24) continue;
+            n++;
+            const rv = rd[(ryB + x + tx) * 4 + c];
+            sumR += rv; sumR2 += rv * rv; sumTR += rv * td[ti + c];
+          }
         }
+        const muR = sumR / n;
+        const sigR2 = sumR2 / n - muR * muR;
+        const sigTR = sumTR / n - muT[c] * muR;
+        ssimSum += (2 * muT[c] * muR + C1) * (2 * sigTR + C2) /
+                   ((muT[c] * muT[c] + muR * muR + C1) * (sigT2[c] + sigR2 + C2));
       }
-      map[y * W + x] = s;
+      map[y * W + x] = ssimSum / 3;
     }
   }
   return { map, W, H };
 }
 
-// Extract the K lowest-SSD positions, suppressing a neighbourhood around
+// Extract the K highest-SSIM positions, suppressing a neighbourhood around
 // each pick so candidates are spatially distinct (non-maximum suppression).
 function topKCandidates(map, W, H, K, sepX, sepY) {
   const work = Float64Array.from(map);
   const out = [];
   for (let k = 0; k < K; k++) {
-    let best = Infinity, bi = -1;
-    for (let i = 0; i < work.length; i++) if (work[i] < best) { best = work[i]; bi = i; }
-    if (bi < 0 || best === Infinity) break;
+    let best = -Infinity, bi = -1;
+    for (let i = 0; i < work.length; i++) if (work[i] > best) { best = work[i]; bi = i; }
+    if (bi < 0 || best === -Infinity) break;
     const cx = bi % W, cy = (bi / W) | 0;
     out.push({ x: cx, y: cy, score: best });
     for (let yy = Math.max(0, cy - sepY); yy <= Math.min(H - 1, cy + sepY); yy++)
       for (let xx = Math.max(0, cx - sepX); xx <= Math.min(W - 1, cx + sepX); xx++)
-        work[yy * W + xx] = Infinity;
+        work[yy * W + xx] = -Infinity;
   }
   return out;
 }
 
-// Dense SSD over a small window, with early termination against `initBest`.
+// Dense SSIM over a small window (fine-pass refinement).
 function scanWindow(rd, refW, td, tmW, tmH, xs, xe, ys, ye, initBest) {
   let best = initBest, bx = xs, by = ys;
+  // Precompute template stats once for all positions in this window.
+  let sumT = [0, 0, 0], sumT2 = [0, 0, 0], nOpaque = 0;
+  for (let ty = 0; ty < tmH; ty++) {
+    for (let tx = 0; tx < tmW; tx++) {
+      const ti = (ty * tmW + tx) * 4;
+      if (td[ti + 3] < 24) continue;
+      nOpaque++;
+      for (let c = 0; c < 3; c++) { sumT[c] += td[ti + c]; sumT2[c] += td[ti + c] * td[ti + c]; }
+    }
+  }
+  if (nOpaque === 0) return { x: bx, y: by, score: best };
+  const muT = sumT.map(s => s / nOpaque);
+  const sigT2 = sumT2.map((s, c) => s / nOpaque - muT[c] * muT[c]);
+
   for (let y = ys; y <= ye; y++) {
     for (let x = xs; x <= xe; x++) {
-      let s = 0;
-      for (let ty = 0; ty < tmH; ty++) {
-        const ryB = (y + ty) * refW, tyB = ty * tmW;
-        for (let tx = 0; tx < tmW; tx++) {
-          const ti = (tyB + tx) * 4;
-          if (td[ti + 3] < 24) continue;
-          const ri = (ryB + (x + tx)) * 4;
-          const dr = rd[ri] - td[ti], dg = rd[ri + 1] - td[ti + 1], db = rd[ri + 2] - td[ti + 2];
-          s += dr * dr + dg * dg + db * db;
+      let ssimSum = 0;
+      for (let c = 0; c < 3; c++) {
+        let sumR = 0, sumR2 = 0, sumTR = 0, n = 0;
+        for (let ty = 0; ty < tmH; ty++) {
+          const ryB = (y + ty) * refW, tyB = ty * tmW;
+          for (let tx = 0; tx < tmW; tx++) {
+            const ti = (tyB + tx) * 4;
+            if (td[ti + 3] < 24) continue;
+            n++;
+            const rv = rd[(ryB + x + tx) * 4 + c];
+            sumR += rv; sumR2 += rv * rv; sumTR += rv * td[ti + c];
+          }
         }
-        if (s >= best) break;
+        const muR = sumR / n;
+        const sigR2 = sumR2 / n - muR * muR;
+        const sigTR = sumTR / n - muT[c] * muR;
+        ssimSum += (2 * muT[c] * muR + C1) * (2 * sigTR + C2) /
+                   ((muT[c] * muT[c] + muR * muR + C1) * (sigT2[c] + sigR2 + C2));
       }
-      if (s < best) { best = s; bx = x; by = y; }
+      const s = ssimSum / 3;
+      if (s > best) { best = s; bx = x; by = y; }
     }
   }
   return { x: bx, y: by, score: best };
 }
 
-// Build a reusable pyramid context for the SSD fallback search.
+// Build a reusable pyramid context for the SSIM fallback search.
 function buildPyramidCtx() {
   const designW = state.layoutW, designH = state.layoutH;
   const fc = Math.min(MATCH_COARSE, designW) / designW;
@@ -319,7 +365,7 @@ function buildPyramidCtx() {
   };
 }
 
-// SSD pyramid + top-K match for a single asset (the fallback path).
+// SSIM pyramid + top-K match for a single asset (the fallback path).
 function pyramidMatchAsset(a, p) {
   let dispW = Math.min(a.nativeW, p.designW);
   let dispH = a.nativeH * (dispW / a.nativeW);
@@ -328,24 +374,24 @@ function pyramidMatchAsset(a, p) {
   const ctw = Math.max(2, Math.round(dispW * p.fc));
   const cth = Math.max(2, Math.round(dispH * p.fc));
   const ctd = getScaledData(a.img, ctw, cth).data;
-  const { map, W, H } = ssdMap(p.refCoarse, p.cW, p.cH, ctd, ctw, cth);
+  const { map, W, H } = ssimMap(p.refCoarse, p.cW, p.cH, ctd, ctw, cth);
   const cands = topKCandidates(map, W, H, TOPK, Math.ceil(ctw / 2), Math.ceil(cth / 2));
 
   const ftw = Math.max(2, Math.round(dispW * p.ff));
   const fth = Math.max(2, Math.round(dispH * p.ff));
   const ftd = getScaledData(a.img, ftw, fth).data;
-  let best = { x: 0, y: 0, score: Infinity };
+  let best = { x: 0, y: 0, score: -Infinity };
   for (const c of cands) {
     const cx = Math.round(c.x * p.ratio), cy = Math.round(c.y * p.ratio);
     const x0 = Math.max(0, cx - p.pad), x1 = Math.min(p.fW - ftw, cx + p.pad);
     const y0 = Math.max(0, cy - p.pad), y1 = Math.min(p.fH - fth, cy + p.pad);
     if (x1 < x0 || y1 < y0) continue;
     const m = scanWindow(p.refFine, p.fW, ftd, ftw, fth, x0, x1, y0, y1, best.score);
-    if (m.score < best.score) best = m;
+    if (m.score > best.score) best = m;
   }
   a.w = dispW; a.h = dispH;
-  if (best.score !== Infinity) { a.x = best.x / p.ff; a.y = best.y / p.ff; }
-  a.score = best.score === Infinity ? null : best.score;
+  if (best.score !== -Infinity) { a.x = best.x / p.ff; a.y = best.y / p.ff; }
+  a.score = best.score === -Infinity ? null : best.score;
 }
 
 autoPlaceBtn.addEventListener("click", async () => {
@@ -356,7 +402,7 @@ autoPlaceBtn.addEventListener("click", async () => {
   try {
     const pctx = buildPyramidCtx();
     for (let i = 0; i < state.assets.length; i++) {
-      statusEl.textContent = `SSD 比對 (${i + 1}/${state.assets.length}) ${state.assets[i].name}`;
+      statusEl.textContent = `SSIM 比對 (${i + 1}/${state.assets.length}) ${state.assets[i].name}`;
       await new Promise((r) => setTimeout(r, 0));   // yield so the UI stays alive
       pyramidMatchAsset(state.assets[i], pctx);
     }
@@ -480,7 +526,7 @@ function renderLayerList() {
     li.append(eye, thumb, nm, order);
     if (a.score != null) {
       const sc = document.createElement("span");
-      sc.className = "score"; sc.textContent = "ssd " + Math.round(a.score);
+      sc.className = "score"; sc.textContent = "ssim " + (a.score * 100).toFixed(1) + "%";
       li.insertBefore(sc, order);
     }
     layerList.appendChild(li);
