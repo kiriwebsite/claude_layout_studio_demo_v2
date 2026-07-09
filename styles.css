@@ -149,6 +149,17 @@ body {
 .ctrl-hint { color: var(--muted); font-size: 12px; }
 .status { color: var(--accent); font-size: 13px; margin-left: auto; }
 
+/* Gemini AI controls */
+.ai-group { display: flex; align-items: center; gap: 8px; }
+.ai-group #geminiKey {
+  width: 150px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 12px;
+}
+.ai-group #geminiModel {
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px; font-size: 12px; cursor: pointer;
+}
+
 /* Stage */
 .stage { display: grid; grid-template-columns: 260px 1fr; gap: 14px; align-items: start; }
 .canvas-wrap {
@@ -194,6 +205,20 @@ canvas:active { cursor: grabbing; }
   font-size: 14px; padding: 0 2px; line-height: 1; filter: grayscale(.2);
 }
 .eye-btn:hover { filter: none; transform: scale(1.1); }
+
+/* AI re-place checkbox + double-check suggestion controls in the layer panel */
+.ai-pick { width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; flex: none; margin: 0; }
+.suggest-badge {
+  color: #38d090; border: 1px solid #38d090; border-radius: 4px;
+  font-size: 10px; padding: 1px 4px; white-space: nowrap;
+}
+.mini-btn {
+  background: var(--panel); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 4px;
+  font-size: 10px; padding: 2px 6px; cursor: pointer; white-space: nowrap;
+}
+.mini-btn:hover { color: #38d090; border-color: #38d090; }
+.mini-btn.dismiss:hover { color: var(--danger); border-color: var(--danger); }
 
 .order-btns { display: flex; flex-direction: column; gap: 1px; }
 .ord-btn {

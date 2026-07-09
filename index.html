@@ -40,6 +40,15 @@
         <input type="range" id="assetOpacity" min="20" max="100" value="100" />
         <span id="assetOpacityVal">100%</span>
       </label>
+      <span class="ai-group">
+        <input type="password" id="geminiKey" placeholder="Gemini API key" autocomplete="off" />
+        <select id="geminiModel" title="Gemini 模型">
+          <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+          <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+        </select>
+        <button id="aiFixBtn" class="primary-btn small" disabled title="在左側素材清單勾選定位錯誤的素材後，交給 Gemini 重新定位">AI 重新定位</button>
+        <button id="aiCheckBtn" class="primary-btn small" disabled title="讓 Gemini 掃描全部素材位置，列出疑似錯位的建議，逐項確認後套用">AI 全面檢查</button>
+      </span>
       <span class="ctrl-hint">定位後可拖曳微調；降低素材透明度即可對齊示意圖</span>
       <span id="status" class="status"></span>
     </div>

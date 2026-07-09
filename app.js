@@ -28,6 +28,10 @@ const resetBtn = el("resetBtn");
 const showRefToggle = el("showRefToggle");
 const assetOpacitySlider = el("assetOpacity");
 const assetOpacityVal = el("assetOpacityVal");
+const geminiKeyInput = el("geminiKey");
+const geminiModelSelect = el("geminiModel");
+const aiFixBtn = el("aiFixBtn");
+const aiCheckBtn = el("aiCheckBtn");
 
 // Cap source images so huge uploads don't blow up memory / crash the tab.
 const MAX_DIM = 1600;
@@ -144,6 +148,15 @@ function tryEnableAutoPlace() {
   const ready = state.refImg && state.bg;
   autoPlaceBtn.disabled = !ready;
   downloadBtn.disabled = !(state.bg && state.assets.length);
+  updateAiButtons();
+}
+
+// AI buttons need everything SSIM needs PLUS an API key; re-place also
+// needs at least one asset ticked in the layer panel.
+function updateAiButtons() {
+  const ready = state.refImg && state.bg && state.assets.length && geminiKeyInput.value.trim();
+  aiCheckBtn.disabled = !ready;
+  aiFixBtn.disabled = !(ready && state.assets.some((a) => a.aiSel));
 }
 
 function defaultLayout() {
@@ -207,6 +220,13 @@ function draw() {
     ctx.strokeStyle = state.drag && state.drag.idx === i ? "#38d090" : "rgba(91,140,255,0.8)";
     ctx.lineWidth = 1.5;
     ctx.strokeRect(a.x * s + 0.5, a.y * s + 0.5, a.w * s, a.h * s);
+    // Pending AI double-check suggestion: dashed green target rect.
+    if (a.suggest) {
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = "#38d090";
+      ctx.strokeRect(a.suggest.x * s + 0.5, a.suggest.y * s + 0.5, a.suggest.w * s, a.suggest.h * s);
+      ctx.setLineDash([]);
+    }
   });
 }
 
@@ -423,6 +443,236 @@ autoPlaceBtn.addEventListener("click", async () => {
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 // ============================================================
+// Gemini AI assisted placement (second-pass fix after SSIM)
+// ----------------------------------------------------------
+// Two user-chosen paths:
+//  A) tick misplaced assets in the layer panel → "AI 重新定位" asks Gemini
+//     to locate each ticked asset inside the reference and applies directly.
+//  B) "AI 全面檢查" (double check) sends the reference + current layout and
+//     asks which assets look misplaced; results become per-asset suggestions
+//     the user applies/dismisses one by one — never auto-overwritten.
+// This is the project's ONLY network call, fired only by these two buttons.
+// Box convention: box_2d = [ymin, xmin, ymax, xmax] normalized to 0-1000.
+// ============================================================
+const GEMINI_LS_KEY = "gemini-key";
+const GEMINI_LS_MODEL = "gemini-model";
+const AI_BATCH = 8;            // assets per request (free-tier RPM is tight)
+
+geminiKeyInput.value = localStorage.getItem(GEMINI_LS_KEY) || "";
+geminiModelSelect.value = localStorage.getItem(GEMINI_LS_MODEL) || "gemini-2.5-flash";
+geminiKeyInput.addEventListener("input", () => {
+  localStorage.setItem(GEMINI_LS_KEY, geminiKeyInput.value.trim());
+  updateAiButtons();
+});
+geminiModelSelect.addEventListener("change", () =>
+  localStorage.setItem(GEMINI_LS_MODEL, geminiModelSelect.value));
+
+// Downscale an image and wrap it as an inline_data part. Coordinates come
+// back normalized (0-1000) so shrinking never hurts positional accuracy.
+function imgToInlinePart(img, maxDim) {
+  const s = Math.min(1, maxDim / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * s));
+  const h = Math.max(1, Math.round(img.height * s));
+  _scaleCanvas.width = w; _scaleCanvas.height = h;
+  _scaleCtx.clearRect(0, 0, w, h);
+  _scaleCtx.drawImage(img, 0, 0, w, h);
+  return { inline_data: { mime_type: "image/png", data: _scaleCanvas.toDataURL("image/png").split(",")[1] } };
+}
+
+// Snapshot of the CURRENT layout (bg + visible assets, no reference overlay)
+// so Gemini can compare it against the reference in double-check mode.
+function currentLayoutPart(maxDim = 1536) {
+  const s = Math.min(1, maxDim / Math.max(state.layoutW, state.layoutH));
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(state.layoutW * s));
+  c.height = Math.max(1, Math.round(state.layoutH * s));
+  const cx = c.getContext("2d");
+  cx.drawImage(state.bg.img, 0, 0, c.width, c.height);
+  for (const a of state.assets) {
+    if (a.visible === false) continue;
+    cx.drawImage(a.img, a.x * s, a.y * s, a.w * s, a.h * s);
+  }
+  return { inline_data: { mime_type: "image/png", data: c.toDataURL("image/png").split(",")[1] } };
+}
+
+// One generateContent call with structured JSON output. Throws with a
+// user-facing message on failure; callers surface it via statusEl.
+async function geminiCall(parts, responseSchema) {
+  const key = geminiKeyInput.value.trim();
+  const model = geminiModelSelect.value;
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify({
+        contents: [{ parts }],
+        generationConfig: { responseMimeType: "application/json", responseSchema },
+      }),
+    }
+  );
+  if (!res.ok) {
+    let apiMsg = "";
+    try { apiMsg = (await res.json()).error?.message || ""; } catch { /* keep generic */ }
+    if (res.status === 401 || res.status === 403 || /api key/i.test(apiMsg))
+      throw new Error("API key 無效或無權限");
+    if (res.status === 429) throw new Error("已達速率上限，請稍後再試");
+    throw new Error(apiMsg || "HTTP " + res.status);
+  }
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("Gemini 回應為空");
+  return JSON.parse(text);
+}
+
+// box_2d (0-1000 on the reference) → layout-space rect. Height always
+// derives from width so assets keep their aspect ratio (same invariant
+// as restoreSession) — Gemini's box only decides position and width.
+function boxToRect(a, box) {
+  const [ymin, xmin, , xmax] = box;
+  const w = clamp((xmax - xmin) / 1000 * state.layoutW, 4, state.layoutW);
+  const h = w * (a.nativeH / a.nativeW);
+  return {
+    x: clamp(xmin / 1000 * state.layoutW, 0, Math.max(0, state.layoutW - w)),
+    y: clamp(ymin / 1000 * state.layoutH, 0, Math.max(0, state.layoutH - h)),
+    w, h,
+  };
+}
+
+const BOX_SCHEMA = {
+  type: "ARRAY",
+  items: {
+    type: "OBJECT",
+    properties: {
+      index: { type: "INTEGER" },
+      box_2d: { type: "ARRAY", items: { type: "INTEGER" } },
+    },
+    required: ["index", "box_2d"],
+  },
+};
+
+// ---- A) Re-place the ticked assets ----
+aiFixBtn.addEventListener("click", async () => {
+  const picked = state.assets.map((a, i) => ({ a, i })).filter((p) => p.a.aiSel);
+  if (!picked.length) return;
+  aiFixBtn.disabled = true; aiCheckBtn.disabled = true;
+
+  try {
+    for (let b = 0; b < picked.length; b += AI_BATCH) {
+      const batch = picked.slice(b, b + AI_BATCH);
+      statusEl.textContent = `AI 重新定位中… (${Math.min(b + AI_BATCH, picked.length)}/${picked.length})`;
+      const parts = [
+        { text:
+          "第一張圖是完整的版面示意圖。之後每張圖是一個素材，依序編號 asset_0、asset_1…。" +
+          "請在示意圖中找出每個素材出現的位置，回傳 JSON 陣列，每個元素為 " +
+          '{"index": 素材編號, "box_2d": [ymin, xmin, ymax, xmax]}，' +
+          "box_2d 是該素材在示意圖上的範圍，normalized 到 0-1000。" },
+        imgToInlinePart(state.refImg, 1536),
+      ];
+      batch.forEach((p, bi) => {
+        parts.push({ text: `asset_${bi}（檔名 ${p.a.name}）：` });
+        parts.push(imgToInlinePart(p.a.img, 512));
+      });
+
+      const out = await geminiCall(parts, BOX_SCHEMA);
+      for (const r of Array.isArray(out) ? out : []) {
+        const p = batch[r.index];
+        if (!p || !Array.isArray(r.box_2d) || r.box_2d.length !== 4) continue;
+        const rect = boxToRect(p.a, r.box_2d);
+        p.a.x = rect.x; p.a.y = rect.y; p.a.w = rect.w; p.a.h = rect.h;
+        p.a.aiSel = false;
+      }
+    }
+    statusEl.textContent = "✓ AI 重新定位完成，可拖曳微調";
+    renderLayerList(); draw(); saveSession();
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = "⚠ AI 定位失敗：" + (err && err.message ? err.message : err);
+  } finally {
+    updateAiButtons();
+  }
+});
+
+// ---- B) Double check the whole layout → per-asset suggestions ----
+const CHECK_SCHEMA = {
+  type: "ARRAY",
+  items: {
+    type: "OBJECT",
+    properties: {
+      index: { type: "INTEGER" },
+      ok: { type: "BOOLEAN" },
+      box_2d: { type: "ARRAY", items: { type: "INTEGER" } },
+    },
+    required: ["index", "ok"],
+  },
+};
+
+aiCheckBtn.addEventListener("click", async () => {
+  aiFixBtn.disabled = true; aiCheckBtn.disabled = true;
+  statusEl.textContent = "AI 全面檢查中…";
+
+  try {
+    const layoutList = state.assets.map((a, i) => ({
+      index: i,
+      name: a.name,
+      box_2d: [
+        Math.round(a.y / state.layoutH * 1000),
+        Math.round(a.x / state.layoutW * 1000),
+        Math.round((a.y + a.h) / state.layoutH * 1000),
+        Math.round((a.x + a.w) / state.layoutW * 1000),
+      ],
+    }));
+    const parts = [
+      { text:
+        "第一張圖是目標版面示意圖，第二張圖是目前的排版結果。" +
+        "以下 JSON 是目前每個素材的位置（box_2d = [ymin, xmin, ymax, xmax]，normalized 0-1000）：\n" +
+        JSON.stringify(layoutList) + "\n" +
+        "請逐一比對示意圖，判斷每個素材的位置是否正確。回傳 JSON 陣列，每個元素為 " +
+        '{"index": 編號, "ok": true 或 false, "box_2d": [...]}；' +
+        "ok 為 false 時 box_2d 必須給出該素材在示意圖上的正確位置，ok 為 true 時省略 box_2d。" },
+      imgToInlinePart(state.refImg, 1536),
+      currentLayoutPart(),
+    ];
+
+    const out = await geminiCall(parts, CHECK_SCHEMA);
+    state.assets.forEach((a) => { a.suggest = null; });
+    let flagged = 0;
+    for (const r of Array.isArray(out) ? out : []) {
+      const a = state.assets[r.index];
+      if (!a || r.ok !== false || !Array.isArray(r.box_2d) || r.box_2d.length !== 4) continue;
+      a.suggest = boxToRect(a, r.box_2d);
+      flagged++;
+    }
+    statusEl.textContent = flagged
+      ? `AI 檢查完成：${flagged} 項疑似錯位，請在左側逐項確認`
+      : "✓ AI 檢查完成：全部位置正確";
+    renderLayerList(); draw();
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = "⚠ AI 檢查失敗：" + (err && err.message ? err.message : err);
+  } finally {
+    updateAiButtons();
+  }
+});
+
+// Apply / dismiss a double-check suggestion (suggest is transient UI state —
+// it is deliberately NOT persisted to IndexedDB).
+function applySuggest(idx) {
+  const a = state.assets[idx];
+  if (!a || !a.suggest) return;
+  a.x = a.suggest.x; a.y = a.suggest.y; a.w = a.suggest.w; a.h = a.suggest.h;
+  a.suggest = null;
+  renderLayerList(); draw(); saveSession();
+}
+
+function dismissSuggest(idx) {
+  const a = state.assets[idx];
+  if (!a) return;
+  a.suggest = null;
+  renderLayerList(); draw();
+}
+
+// ============================================================
 // Drag to fine-tune
 // ============================================================
 canvas.addEventListener("mousedown", (e) => {
@@ -498,6 +748,14 @@ function renderLayerList() {
     const li = document.createElement("li");
     li.className = "layer-item" + (hidden ? " hidden-layer" : "");
 
+    // Tick to queue this asset for "AI 重新定位".
+    const pick = document.createElement("input");
+    pick.type = "checkbox";
+    pick.className = "ai-pick";
+    pick.title = "勾選後可用「AI 重新定位」修正這張素材";
+    pick.checked = !!a.aiSel;
+    pick.addEventListener("change", () => { a.aiSel = pick.checked; updateAiButtons(); });
+
     const eye = document.createElement("button");
     eye.className = "eye-btn";
     eye.title = hidden ? "顯示" : "隱藏";
@@ -523,8 +781,21 @@ function renderLayerList() {
     down.addEventListener("click", () => moveLayer(i, -1));
     order.append(up, down);
 
-    li.append(eye, thumb, nm, order);
-    if (a.score != null) {
+    li.append(pick, eye, thumb, nm, order);
+    if (a.suggest) {
+      // Double-check flagged this asset: show apply/dismiss instead of the
+      // score (the row is narrow — suggestion controls take priority).
+      const bd = document.createElement("span");
+      bd.className = "suggest-badge"; bd.textContent = "建議移動";
+      const ap = document.createElement("button");
+      ap.className = "mini-btn"; ap.textContent = "套用";
+      ap.title = "移動到畫布上綠色虛線框的位置";
+      ap.addEventListener("click", () => applySuggest(i));
+      const ig = document.createElement("button");
+      ig.className = "mini-btn dismiss"; ig.textContent = "忽略";
+      ig.addEventListener("click", () => dismissSuggest(i));
+      li.insertBefore(bd, order); li.insertBefore(ap, order); li.insertBefore(ig, order);
+    } else if (a.score != null) {
       const sc = document.createElement("span");
       sc.className = "score"; sc.textContent = "ssim " + (a.score * 100).toFixed(1) + "%";
       li.insertBefore(sc, order);
