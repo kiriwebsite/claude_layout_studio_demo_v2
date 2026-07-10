@@ -36,9 +36,9 @@
     <div class="controls">
       <button id="autoPlaceBtn" class="primary-btn small" disabled>SSIM 自動定位</button>
       <label class="check"><input type="checkbox" id="showRefToggle" checked /> 顯示示意圖</label>
-      <label class="slider">素材透明度
-        <input type="range" id="assetOpacity" min="20" max="100" value="100" />
-        <span id="assetOpacityVal">100%</span>
+      <label class="slider">示意圖透明度
+        <input type="range" id="refOpacity" min="0" max="100" value="100" />
+        <span id="refOpacityVal">100%</span>
       </label>
       <span class="ai-group">
         <input type="password" id="geminiKey" placeholder="Gemini API key" autocomplete="off" />
@@ -49,7 +49,7 @@
         <button id="aiFixBtn" class="primary-btn small" disabled title="在左側素材清單勾選定位錯誤的素材後，交給 Gemini 重新定位">AI 重新定位</button>
         <button id="aiCheckBtn" class="primary-btn small" disabled title="讓 Gemini 掃描全部素材位置，列出疑似錯位的建議，逐項確認後套用">AI 全面檢查</button>
       </span>
-      <span class="ctrl-hint">定位後可拖曳微調；降低素材透明度即可對齊示意圖</span>
+      <span class="ctrl-hint">定位後可拖曳微調；降低示意圖透明度即可看清素材是否對齊</span>
       <span id="status" class="status"></span>
     </div>
 
@@ -59,7 +59,15 @@
         <ul id="layerList" class="layer-list"></ul>
       </aside>
       <div class="canvas-wrap">
-        <canvas id="canvas"></canvas>
+        <canvas id="canvas" hidden></canvas>
+        <div id="viewport" class="viewport">
+          <div id="board" class="board">
+            <img id="boardBg" class="board-bg" alt="" draggable="false" />
+            <img id="boardRef" class="board-ref" alt="" draggable="false" />
+            <div id="assetLayer" class="asset-layer"></div>
+            <div id="guideLayer" class="guide-layer"></div>
+          </div>
+        </div>
       </div>
     </div>
 

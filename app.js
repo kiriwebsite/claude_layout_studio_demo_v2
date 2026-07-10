@@ -26,12 +26,19 @@ const downloadBtn = el("downloadBtn");
 const saveStatus = el("saveStatus");
 const resetBtn = el("resetBtn");
 const showRefToggle = el("showRefToggle");
-const assetOpacitySlider = el("assetOpacity");
-const assetOpacityVal = el("assetOpacityVal");
+const refOpacitySlider = el("refOpacity");
+const refOpacityVal = el("refOpacityVal");
 const geminiKeyInput = el("geminiKey");
 const geminiModelSelect = el("geminiModel");
 const aiFixBtn = el("aiFixBtn");
 const aiCheckBtn = el("aiCheckBtn");
+// DOM editor board (display layer). The canvas above is kept only for SSIM/Gemini.
+const viewport = el("viewport");
+const board = el("board");
+const boardBg = el("boardBg");
+const boardRef = el("boardRef");
+const assetLayer = el("assetLayer");
+const guideLayer = el("guideLayer");
 
 // Cap source images so huge uploads don't blow up memory / crash the tab.
 const MAX_DIM = 1600;
@@ -46,14 +53,15 @@ const state = {
   layoutH: 0,
   scale: 1,            // display scale: canvas px = layout px * scale
   drag: null,          // { idx, offX, offY }
+  selection: [],       // indices of currently-selected assets (DOM editor)
 };
 
 // ============================================================
-// View controls: reference overlay + asset opacity (for aligning)
+// View controls: reference opacity (fade the target under opaque assets)
 // ============================================================
 showRefToggle.addEventListener("change", draw);
-assetOpacitySlider.addEventListener("input", () => {
-  assetOpacityVal.textContent = assetOpacitySlider.value + "%";
+refOpacitySlider.addEventListener("input", () => {
+  refOpacityVal.textContent = refOpacitySlider.value + "%";
   draw();
 });
 
@@ -184,50 +192,90 @@ function currentDims() {
   return null;
 }
 
+// Size the DOM board to the design's aspect ratio and wire the bg/reference
+// images. Assets themselves are positioned in % by draw(), so the board scales
+// fluidly with the column (and never upscales past the native width).
 function setupCanvas() {
   const d = currentDims();
-  if (!d) { canvas.width = 0; canvas.height = 0; return; }
-  // Fit the canvas bitmap to a sane width; CSS scales it to the column and the
-  // page's own scrollbar handles tall layouts (no inner canvas scroll).
-  const maxBitmapW = 1280;
-  state.scale = Math.min(maxBitmapW / d.W, 1);
-  canvas.width = Math.round(d.W * state.scale);
-  canvas.height = Math.round(d.H * state.scale);
+  if (!d) { canvas.width = 0; canvas.height = 0; board.style.display = "none"; return; }
+  state.scale = 1;
+  board.style.display = "";
+  board.style.aspectRatio = d.W + " / " + d.H;
+  board.style.maxWidth = d.W + "px";
+  if (state.bg) { boardBg.src = state.bg.img.src; boardBg.style.display = ""; }
+  else { boardBg.removeAttribute("src"); boardBg.style.display = "none"; }
+  if (state.refImg) boardRef.src = state.refImg.src;
+  else boardRef.removeAttribute("src");
 }
 
-function draw() {
+// Render the whole board from state. `guides` (optional) draws alignment lines
+// during a drag. Rebuilding the asset DOM each call is fine for tens of assets.
+function draw(guides) {
   const d = currentDims();
-  if (!d) { ctx.clearRect(0, 0, canvas.width, canvas.height); return; }
-  const s = state.scale;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!d) { assetLayer.innerHTML = ""; guideLayer.innerHTML = ""; return; }
 
-  // Backdrop: bg.png if present.
-  if (state.bg) ctx.drawImage(state.bg.img, 0, 0, canvas.width, canvas.height);
-
-  // Reference overlay — stays visible through and after SSIM for comparison.
+  // Reference — sits above bg and below all assets. Its opacity is adjustable
+  // so you can fade the target while the opaque assets on top stay solid.
   if (showRefToggle.checked && state.refImg) {
-    ctx.drawImage(state.refImg, 0, 0, canvas.width, canvas.height);
+    boardRef.style.display = "";
+    boardRef.style.opacity = (parseInt(refOpacitySlider.value, 10) || 100) / 100;
+  } else {
+    boardRef.style.display = "none";
   }
 
-  // Assets — array order is back-to-front; hidden ones are skipped.
-  // Drawn at the chosen opacity so you can see the reference underneath.
-  const opacity = (parseInt(assetOpacitySlider.value, 10) || 100) / 100;
+  renderAssets(d);
+  renderGuides(guides);
+}
+
+// Each visible asset becomes an absolutely-positioned, %-sized <div><img></div>
+// — identical to the exported markup, so the board is a live preview of it.
+function renderAssets(d) {
+  const W = d.W, H = d.H;
+  assetLayer.innerHTML = "";
+  const single = state.selection.length === 1 ? state.selection[0] : -1;
   state.assets.forEach((a, i) => {
     if (a.visible === false) return;
-    ctx.globalAlpha = opacity;
-    ctx.drawImage(a.img, a.x * s, a.y * s, a.w * s, a.h * s);
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = state.drag && state.drag.idx === i ? "#38d090" : "rgba(91,140,255,0.8)";
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(a.x * s + 0.5, a.y * s + 0.5, a.w * s, a.h * s);
-    // Pending AI double-check suggestion: dashed green target rect.
+    const elDiv = document.createElement("div");
+    elDiv.className = "asset-el" + (state.selection.includes(i) ? " selected" : "");
+    elDiv.dataset.idx = i;
+    elDiv.style.left = pct(a.x, W) + "%";
+    elDiv.style.top = pct(a.y, H) + "%";
+    elDiv.style.width = pct(a.w, W) + "%";
+    elDiv.style.zIndex = i + 1;
+    const im = document.createElement("img");
+    im.src = a.img.src; im.draggable = false; im.alt = a.name;
+    elDiv.appendChild(im);
+    if (i === single) {
+      for (const c of ["nw", "ne", "sw", "se"]) {
+        const hd = document.createElement("div");
+        hd.className = "handle " + c; hd.dataset.corner = c;
+        elDiv.appendChild(hd);
+      }
+    }
+    assetLayer.appendChild(elDiv);
+
     if (a.suggest) {
-      ctx.setLineDash([6, 4]);
-      ctx.strokeStyle = "#38d090";
-      ctx.strokeRect(a.suggest.x * s + 0.5, a.suggest.y * s + 0.5, a.suggest.w * s, a.suggest.h * s);
-      ctx.setLineDash([]);
+      const sg = document.createElement("div");
+      sg.className = "sel-suggest";
+      sg.style.left = pct(a.suggest.x, W) + "%";
+      sg.style.top = pct(a.suggest.y, H) + "%";
+      sg.style.width = pct(a.suggest.w, W) + "%";
+      sg.style.height = pct(a.suggest.h, H) + "%";
+      assetLayer.appendChild(sg);
     }
   });
+}
+
+function renderGuides(guides) {
+  guideLayer.innerHTML = "";
+  if (!guides || !guides.length) return;
+  const W = state.layoutW, H = state.layoutH;
+  for (const g of guides) {
+    const l = document.createElement("div");
+    if (g.type === "v") { l.className = "guide-line v"; l.style.left = pct(g.pos, W) + "%"; }
+    else { l.className = "guide-line h"; l.style.top = pct(g.pos, H) + "%"; }
+    guideLayer.appendChild(l);
+  }
 }
 
 
@@ -420,6 +468,7 @@ autoPlaceBtn.addEventListener("click", async () => {
   await new Promise((r) => setTimeout(r, 30));
 
   try {
+    beginChange();   // one undo step reverts the whole SSIM pass
     const pctx = buildPyramidCtx();
     for (let i = 0; i < state.assets.length; i++) {
       statusEl.textContent = `SSIM 比對 (${i + 1}/${state.assets.length}) ${state.assets[i].name}`;
@@ -660,6 +709,7 @@ aiCheckBtn.addEventListener("click", async () => {
 function applySuggest(idx) {
   const a = state.assets[idx];
   if (!a || !a.suggest) return;
+  beginChange();
   a.x = a.suggest.x; a.y = a.suggest.y; a.w = a.suggest.w; a.h = a.suggest.h;
   a.suggest = null;
   renderLayerList(); draw(); saveSession();
@@ -673,46 +723,170 @@ function dismissSuggest(idx) {
 }
 
 // ============================================================
-// Drag to fine-tune
+// Selection, undo history, and direct manipulation on the board
 // ============================================================
-canvas.addEventListener("mousedown", (e) => {
-  const { lx, ly } = toLayout(e);
-  // Hit-test front-to-back; skip hidden layers. Stacking order is NOT changed
-  // here so manual up/down ordering from the layer panel is respected.
-  for (let i = state.assets.length - 1; i >= 0; i--) {
-    const a = state.assets[i];
-    if (a.visible === false) continue;
-    if (lx >= a.x && lx <= a.x + a.w && ly >= a.y && ly <= a.y + a.h) {
-      state.drag = { idx: i, offX: lx - a.x, offY: ly - a.y };
-      draw();
-      return;
-    }
+// Selection is a list of asset indices. Clicking selects one; Shift toggles.
+function selectAsset(i, additive) {
+  if (additive) {
+    const p = state.selection.indexOf(i);
+    if (p >= 0) state.selection.splice(p, 1); else state.selection.push(i);
+  } else {
+    state.selection = [i];
   }
+  renderLayerList(); draw();
+}
+function clearSelection() {
+  if (!state.selection.length) return;
+  state.selection = [];
+  renderLayerList(); draw();
+}
+
+// Undo/redo. A snapshot keeps each asset's object reference plus its geometry
+// and visibility, so deletes and reorders are fully reversible.
+const undoStack = [], redoStack = [];
+function snapAssets() {
+  return state.assets.map((a) => ({ a, x: a.x, y: a.y, w: a.w, h: a.h, visible: a.visible !== false }));
+}
+function restoreAssets(entry) {
+  state.assets = entry.map((e) => { e.a.x = e.x; e.a.y = e.y; e.a.w = e.w; e.a.h = e.h; e.a.visible = e.visible; return e.a; });
+}
+function beginChange() {
+  undoStack.push(snapAssets());
+  if (undoStack.length > 120) undoStack.shift();
+  redoStack.length = 0;
+}
+function undo() {
+  if (!undoStack.length) return;
+  redoStack.push(snapAssets());
+  restoreAssets(undoStack.pop());
+  state.selection = [];
+  renderLayerList(); draw(); saveSession();
+}
+function redo() {
+  if (!redoStack.length) return;
+  undoStack.push(snapAssets());
+  restoreAssets(redoStack.pop());
+  state.selection = [];
+  renderLayerList(); draw(); saveSession();
+}
+function deleteSelected() {
+  if (!state.selection.length) return;
+  beginChange();
+  for (const i of [...state.selection].sort((a, b) => b - a)) state.assets.splice(i, 1);
+  state.selection = [];
+  renderLayerList(); draw(); saveSession();
+}
+
+// layout px per rendered px, plus the board's screen rect (for pointer math).
+function boardMetrics() {
+  const rect = board.getBoundingClientRect();
+  return { rect, k: state.layoutW ? state.layoutW / rect.width : 1 };
+}
+
+let itx = null;   // active interaction: move or resize
+
+board.addEventListener("mousedown", (e) => {
+  if (!state.bg) return;
+  const handle = e.target.closest(".handle");
+  const elDiv = e.target.closest(".asset-el");
+  const { k } = boardMetrics();
+
+  if (handle && state.selection.length === 1) {
+    const i = state.selection[0], a = state.assets[i];
+    itx = { mode: "resize", corner: handle.dataset.corner, k, began: false,
+      orig: { x: a.x, y: a.y, w: a.w, h: a.h, right: a.x + a.w, bottom: a.y + a.h, aspect: a.nativeH / a.nativeW } };
+    e.preventDefault(); return;
+  }
+  if (elDiv) {
+    const i = +elDiv.dataset.idx;
+    if (e.shiftKey) { selectAsset(i, true); e.preventDefault(); return; }
+    if (!state.selection.includes(i)) { state.selection = [i]; renderLayerList(); draw(); }
+    itx = { mode: "move", k, sx: e.clientX, sy: e.clientY, began: false,
+      orig: state.selection.map((idx) => ({ i: idx, x: state.assets[idx].x, y: state.assets[idx].y })) };
+    e.preventDefault(); return;
+  }
+  if (!e.shiftKey) clearSelection();   // click on empty board
 });
 
 window.addEventListener("mousemove", (e) => {
-  if (!state.drag) return;
-  const { lx, ly } = toLayout(e);
-  const a = state.assets[state.drag.idx];
-  a.x = clamp(lx - state.drag.offX, 0, state.layoutW - a.w);
-  a.y = clamp(ly - state.drag.offY, 0, state.layoutH - a.h);
-  draw();
+  if (!itx) return;
+  if (!itx.began) { beginChange(); itx.began = true; }
+  if (itx.mode === "move") {
+    const dx = (e.clientX - itx.sx) * itx.k, dy = (e.clientY - itx.sy) * itx.k;
+    itx.orig.forEach((o) => { const a = state.assets[o.i]; a.x = o.x + dx; a.y = o.y + dy; });
+    const guides = snapSelection();
+    const W = state.layoutW, H = state.layoutH;
+    for (const idx of state.selection) { const a = state.assets[idx]; a.x = clamp(a.x, 0, W - a.w); a.y = clamp(a.y, 0, H - a.h); }
+    draw(guides);
+  } else {
+    resizeTo(e);
+    draw();
+  }
 });
 
 window.addEventListener("mouseup", () => {
-  if (!state.drag) return;
-  state.drag = null;
-  renderLayerList();
-  draw();
-  saveSession();
+  if (!itx) return;
+  const changed = itx.began;
+  itx = null;
+  guideLayer.innerHTML = "";
+  if (changed) { renderLayerList(); draw(); saveSession(); }
 });
 
-function toLayout(e) {
-  const rect = canvas.getBoundingClientRect();
-  const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
-  const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
-  return { lx: cx / state.scale, ly: cy / state.scale };
+// Snap the selection's bounding box to nearby asset edges/centers and to the
+// board's own edges/centerlines. Returns guide lines to draw at the snap.
+function snapSelection() {
+  const W = state.layoutW, H = state.layoutH, thr = 6 * itx.k;
+  const sel = new Set(state.selection);
+  let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+  for (const idx of state.selection) { const a = state.assets[idx]; minX = Math.min(minX, a.x); minY = Math.min(minY, a.y); maxX = Math.max(maxX, a.x + a.w); maxY = Math.max(maxY, a.y + a.h); }
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const targX = [0, W / 2, W], targY = [0, H / 2, H];
+  state.assets.forEach((a, idx) => {
+    if (sel.has(idx) || a.visible === false) return;
+    targX.push(a.x, a.x + a.w / 2, a.x + a.w);
+    targY.push(a.y, a.y + a.h / 2, a.y + a.h);
+  });
+  const best = (srcs, targs) => {
+    let b = null;
+    for (const s of srcs) for (const t of targs) { const d = Math.abs(s - t); if (d <= thr && (!b || d < b.d)) b = { d, off: t - s, pos: t }; }
+    return b;
+  };
+  const bx = best([minX, cx, maxX], targX), by = best([minY, cy, maxY], targY);
+  const guides = [];
+  if (bx) { for (const idx of state.selection) state.assets[idx].x += bx.off; guides.push({ type: "v", pos: bx.pos }); }
+  if (by) { for (const idx of state.selection) state.assets[idx].y += by.off; guides.push({ type: "h", pos: by.pos }); }
+  return guides;
 }
+
+// Four-corner proportional resize (height derives from width to keep aspect,
+// matching the exported height:auto). The opposite corner stays anchored.
+function resizeTo(e) {
+  const { rect, k } = boardMetrics();
+  const W = state.layoutW, H = state.layoutH, MIN = 8;
+  const px = (e.clientX - rect.left) * k, py = (e.clientY - rect.top) * k;
+  const o = itx.orig, c = itx.corner, asp = o.aspect;
+  let w = (c === "se" || c === "ne") ? clamp(px - o.x, MIN, W - o.x) : clamp(o.right - px, MIN, o.right);
+  let h = w * asp;
+  if (c === "se" || c === "sw") { if (o.y + h > H) { h = H - o.y; w = h / asp; } }
+  else { if (o.bottom - h < 0) { h = o.bottom; w = h / asp; } }
+  let x, y;
+  if (c === "se") { x = o.x; y = o.y; }
+  else if (c === "sw") { x = o.right - w; y = o.y; }
+  else if (c === "ne") { x = o.x; y = o.bottom - h; }
+  else { x = o.right - w; y = o.bottom - h; }
+  const a = state.assets[itx.i !== undefined ? itx.i : state.selection[0]];
+  a.w = w; a.h = h; a.x = clamp(x, 0, W - w); a.y = clamp(y, 0, H - h);
+}
+
+// Keyboard: Delete removes selection; Ctrl/Cmd+Z undo, +Shift or Ctrl+Y redo.
+window.addEventListener("keydown", (e) => {
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  const meta = e.ctrlKey || e.metaKey;
+  if (meta && (e.key === "z" || e.key === "Z")) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if (meta && (e.key === "y" || e.key === "Y")) { e.preventDefault(); redo(); return; }
+  if ((e.key === "Delete" || e.key === "Backspace") && state.selection.length) { e.preventDefault(); deleteSelected(); }
+});
 
 // ============================================================
 // Layer list
@@ -721,6 +895,7 @@ function toLayout(e) {
 function toggleVisible(idx) {
   const a = state.assets[idx];
   if (!a) return;
+  beginChange();
   a.visible = a.visible === false;   // flips false<->true; undefined treated as visible
   renderLayerList();
   draw();
@@ -731,8 +906,10 @@ function toggleVisible(idx) {
 function moveLayer(idx, dir) {
   const j = idx + dir;
   if (j < 0 || j >= state.assets.length) return;
+  beginChange();
   const [a] = state.assets.splice(idx, 1);
   state.assets.splice(j, 0, a);
+  state.selection = [];   // indices shift on reorder
   renderLayerList();
   draw();
   saveSession();
@@ -746,7 +923,7 @@ function renderLayerList() {
     const a = state.assets[i];
     const hidden = a.visible === false;
     const li = document.createElement("li");
-    li.className = "layer-item" + (hidden ? " hidden-layer" : "");
+    li.className = "layer-item" + (hidden ? " hidden-layer" : "") + (state.selection.includes(i) ? " selected" : "");
 
     // Tick to queue this asset for "AI 重新定位".
     const pick = document.createElement("input");
@@ -764,10 +941,13 @@ function renderLayerList() {
 
     const thumb = document.createElement("img");
     thumb.src = a.img.src;
+    thumb.style.cursor = "pointer";
+    thumb.addEventListener("click", () => selectAsset(i, false));
 
     const nm = document.createElement("span");
     nm.className = "nm";
     nm.textContent = a.name;
+    nm.addEventListener("click", () => selectAsset(i, false));
 
     const order = document.createElement("span");
     order.className = "order-btns";
@@ -1128,16 +1308,18 @@ resetBtn.addEventListener("click", async () => {
   state.refImg = null; state.refBlob = null;
   state.bg = null; state.assets = [];
   state.layoutW = 0; state.layoutH = 0; state.drag = null;
+  state.selection = []; undoStack.length = 0; redoStack.length = 0;
 
   refInput.value = ""; folderInput.value = ""; filesInput.value = "";
   refName.textContent = "未選擇";
   folderName.textContent = "未選擇";
   statusEl.textContent = "";
   layerList.innerHTML = "";
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  canvas.width = 0; canvas.height = 0;
+  assetLayer.innerHTML = ""; guideLayer.innerHTML = "";
+  board.style.display = "none";
+  boardBg.removeAttribute("src"); boardRef.removeAttribute("src");
   showRefToggle.checked = true;
-  assetOpacitySlider.value = 100; assetOpacityVal.textContent = "100%";
+  refOpacitySlider.value = 100; refOpacityVal.textContent = "100%";
   autoPlaceBtn.disabled = true;
   downloadBtn.disabled = true;
 
