@@ -212,15 +212,16 @@ body {
 .layers h3 { margin: 0 0 10px; font-size: 14px; }
 .layer-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .layer-item {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
   background: var(--bg); border: 1px solid var(--line);
   border-radius: 8px; padding: 6px 8px; font-size: 12px;
+  cursor: pointer; user-select: none;   /* click to select; drag whole row to reorder */
 }
-.layer-item.bg { opacity: .7; }
+.layer-item.bg { opacity: .7; cursor: default; }
 .layer-item.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.layer-item .nm { cursor: pointer; }
-.layer-item img { width: 34px; height: 28px; object-fit: cover; border-radius: 4px; background: #000; }
-.layer-item .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layer-item.dragging { opacity: .4; }
+.layer-item img { width: 44px; height: 36px; flex: none; object-fit: contain; border-radius: 4px; background: #000; pointer-events: none; }
+.layer-item .nm { flex: 1; min-width: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.3; }
 .layer-item .score { color: var(--muted); font-size: 11px; }
 .layer-item.hidden-layer { opacity: .45; }
 .layer-item.hidden-layer .nm { text-decoration: line-through; }
@@ -231,8 +232,11 @@ body {
 }
 .eye-btn:hover { filter: none; transform: scale(1.1); }
 
-/* AI re-place checkbox + double-check suggestion controls in the layer panel */
-.ai-pick { width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; flex: none; margin: 0; }
+/* Double-check suggestion controls in the layer panel */
+.suggest-row {
+  flex-basis: 100%; display: flex; flex-wrap: wrap;
+  align-items: center; gap: 6px;
+}
 .suggest-badge {
   color: #38d090; border: 1px solid #38d090; border-radius: 4px;
   font-size: 10px; padding: 1px 4px; white-space: nowrap;
@@ -244,13 +248,3 @@ body {
 }
 .mini-btn:hover { color: #38d090; border-color: #38d090; }
 .mini-btn.dismiss:hover { color: var(--danger); border-color: var(--danger); }
-
-.order-btns { display: flex; flex-direction: column; gap: 1px; }
-.ord-btn {
-  background: var(--panel); color: var(--muted);
-  border: 1px solid var(--line); border-radius: 4px;
-  width: 18px; height: 14px; line-height: 1; font-size: 8px;
-  cursor: pointer; padding: 0;
-}
-.ord-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
-.ord-btn:disabled { opacity: .3; cursor: default; }

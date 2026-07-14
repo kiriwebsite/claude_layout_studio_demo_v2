@@ -160,11 +160,11 @@ function tryEnableAutoPlace() {
 }
 
 // AI buttons need everything SSIM needs PLUS an API key; re-place also
-// needs at least one asset ticked in the layer panel.
+// needs at least one asset selected in the layer panel (click / Shift-click).
 function updateAiButtons() {
   const ready = state.refImg && state.bg && state.assets.length && geminiKeyInput.value.trim();
   aiCheckBtn.disabled = !ready;
-  aiFixBtn.disabled = !(ready && state.assets.some((a) => a.aiSel));
+  aiFixBtn.disabled = !(ready && state.selection.length);
 }
 
 function defaultLayout() {
@@ -433,8 +433,36 @@ function buildPyramidCtx() {
   };
 }
 
+// Vertical search band per asset from the sN_/footer_ filename convention.
+// On a very tall page the coarse pyramid shrinks small/thin assets to a few
+// pixels, so their SSIM peak is meaningless and they scatter into the wrong
+// section. Restricting each prefixed asset's search to its section's band
+// (with ±1 section of slack, since sections aren't equal height) removes the
+// cross-section false matches. Assets with no prefix search the whole page.
+function sectionBands(assets) {
+  const secOf = (name) => {
+    const s = /^s(\d+)[_-]/i.exec(name);
+    if (s) return parseInt(s[1], 10);
+    if (/^footer[_-]/i.test(name)) return "footer";
+    return null;
+  };
+  const secs = assets.map((a) => secOf(a.name));
+  let maxN = 0, hasFooter = false;
+  for (const s of secs) { if (s === "footer") hasFooter = true; else if (s) maxN = Math.max(maxN, s); }
+  const T = maxN + (hasFooter ? 1 : 0);
+  if (T === 0) return assets.map(() => null);
+  const MARGIN = 1;   // ±1 section of slack
+  return secs.map((s) => {
+    if (!s) return null;
+    const ord = s === "footer" ? T : s;   // 1-based top→bottom position
+    return { yLo: Math.max(0, (ord - 1 - MARGIN) / T), yHi: Math.min(1, (ord + MARGIN) / T) };
+  });
+}
+
 // SSIM pyramid + top-K match for a single asset (the fallback path).
-function pyramidMatchAsset(a, p) {
+// `band` ({yLo,yHi} fractions, or null) confines the coarse candidate search
+// to the asset's section — see sectionBands.
+function pyramidMatchAsset(a, p, band) {
   let dispW = Math.min(a.nativeW, p.designW);
   let dispH = a.nativeH * (dispW / a.nativeW);
   if (dispH > p.designH) { dispH = p.designH; dispW = a.nativeW * (dispH / a.nativeH); }
@@ -443,6 +471,10 @@ function pyramidMatchAsset(a, p) {
   const cth = Math.max(2, Math.round(dispH * p.fc));
   const ctd = getScaledData(a.img, ctw, cth).data;
   const { map, W, H } = ssimMap(p.refCoarse, p.cW, p.cH, ctd, ctw, cth);
+  if (band) {
+    const yLo = band.yLo * H, yHi = band.yHi * H;   // drop out-of-band candidates
+    for (let i = 0; i < map.length; i++) { const yy = (i / W) | 0; if (yy < yLo || yy > yHi) map[i] = -Infinity; }
+  }
   const cands = topKCandidates(map, W, H, TOPK, Math.ceil(ctw / 2), Math.ceil(cth / 2));
 
   const ftw = Math.max(2, Math.round(dispW * p.ff));
@@ -470,10 +502,11 @@ autoPlaceBtn.addEventListener("click", async () => {
   try {
     beginChange();   // one undo step reverts the whole SSIM pass
     const pctx = buildPyramidCtx();
+    const bands = sectionBands(state.assets);   // sN_/footer_ → per-asset vertical band
     for (let i = 0; i < state.assets.length; i++) {
       statusEl.textContent = `SSIM 比對 (${i + 1}/${state.assets.length}) ${state.assets[i].name}`;
       await new Promise((r) => setTimeout(r, 0));   // yield so the UI stays alive
-      pyramidMatchAsset(state.assets[i], pctx);
+      pyramidMatchAsset(state.assets[i], pctx, bands[i]);
     }
 
     statusEl.textContent = "✓ 定位完成，可拖曳微調";
@@ -574,19 +607,75 @@ async function geminiCall(parts, responseSchema) {
   return JSON.parse(text);
 }
 
-// box_2d (0-1000 on the reference) → layout-space rect. Height always
-// derives from width so assets keep their aspect ratio (same invariant
-// as restoreSession) — Gemini's box only decides position and width.
+// box_2d (0-1000 on the reference) → layout-space rect. Gemini's box only
+// decides WHERE the asset goes; its SIZE stays the asset's native size (the
+// same sizing the SSIM path uses), so a loose/tight box can't distort it.
+// The asset is centred on the box centre.
 function boxToRect(a, box) {
-  const [ymin, xmin, , xmax] = box;
-  const w = clamp((xmax - xmin) / 1000 * state.layoutW, 4, state.layoutW);
-  const h = w * (a.nativeH / a.nativeW);
+  const [ymin, xmin, ymax, xmax] = box;
+  let w = Math.min(a.nativeW, state.layoutW);
+  let h = a.nativeH * (w / a.nativeW);
+  if (h > state.layoutH) { h = state.layoutH; w = a.nativeW * (h / a.nativeH); }
+  const cx = (xmin + xmax) / 2 / 1000 * state.layoutW;
+  const cy = (ymin + ymax) / 2 / 1000 * state.layoutH;
   return {
-    x: clamp(xmin / 1000 * state.layoutW, 0, Math.max(0, state.layoutW - w)),
-    y: clamp(ymin / 1000 * state.layoutH, 0, Math.max(0, state.layoutH - h)),
+    x: clamp(cx - w / 2, 0, Math.max(0, state.layoutW - w)),
+    y: clamp(cy - h / 2, 0, Math.max(0, state.layoutH - h)),
     w, h,
   };
 }
+
+// Local SSIM snap after an AI placement. AI gets the SIZE (native) and section
+// right but the position can be a few px off; this slides the asset to the best
+// SSIM match in a SMALL window around it — size is never touched. Right scale +
+// tiny window + right region is exactly where SSIM is reliable. The scale is
+// picked per asset so the template's long side ≈ REFINE_TARGET, which bounds the
+// cost no matter how large the asset is. Only the reference sub-region is read.
+const REFINE_TARGET = 100;   // template long-side after scaling (keeps the SSIM cost bounded)
+const REFINE_RADIUS = 30;    // search radius in SCALED px — a small window (2·radius wide)
+function localRefine(a) {
+  const LW = state.layoutW, LH = state.layoutH;
+  if (!state.refImg || !a.img || a.w < 2 || a.h < 2) return;
+  // Scale so the template long-side ≈ REFINE_TARGET; the scan window is then a
+  // fixed ±REFINE_RADIUS in scaled px, so cost stays bounded for any asset size
+  // (a larger asset just means a larger design-space search radius, and vice
+  // versa). This keeps the search a genuinely SMALL window near the AI spot.
+  const sf = Math.min(1, REFINE_TARGET / Math.max(a.w, a.h));
+  const Rd = REFINE_RADIUS / sf;   // design-space radius
+  const rx0 = Math.max(0, a.x - Rd), ry0 = Math.max(0, a.y - Rd);
+  const rx1 = Math.min(LW, a.x + a.w + Rd), ry1 = Math.min(LH, a.y + a.h + Rd);
+  const regW = rx1 - rx0, regH = ry1 - ry0;
+  if (regW <= a.w || regH <= a.h) return;
+  const sw = Math.max(2, Math.round(regW * sf)), sh = Math.max(2, Math.round(regH * sf));
+  const tw = Math.max(2, Math.round(a.w * sf)), th = Math.max(2, Math.round(a.h * sf));
+  if (tw >= sw || th >= sh) return;
+  // Draw the reference sub-region into the scratch canvas and read it out BEFORE
+  // getScaledData reuses the same canvas for the template.
+  const rimg = state.refImg;
+  const kx = (rimg.naturalWidth || rimg.width) / LW, ky = (rimg.naturalHeight || rimg.height) / LH;
+  _scaleCanvas.width = sw; _scaleCanvas.height = sh;
+  _scaleCtx.clearRect(0, 0, sw, sh);
+  _scaleCtx.drawImage(rimg, rx0 * kx, ry0 * ky, regW * kx, regH * ky, 0, 0, sw, sh);
+  const rdata = _scaleCtx.getImageData(0, 0, sw, sh).data;
+  const td = getScaledData(a.img, tw, th).data;
+  const m = scanWindow(rdata, sw, td, tw, th, 0, sw - tw, 0, sh - th, -Infinity);
+  if (m.score === -Infinity) return;
+  a.x = rx0 + m.x / sf;   // top-left in region px → design space
+  a.y = ry0 + m.y / sf;
+  a.score = m.score;
+}
+
+// Shared filename convention for BOTH AI modes. Prefix → vertical section:
+//   `s<N>_...` (s1_logo.png, s2_banner.png…) = Nth section from the top.
+//   `footer_...` (footer_logo.png…)          = the footer, always at the bottom.
+// On event pages that stack near-identical blocks downward, these prefixes are
+// a strong vertical-band prior that pure image matching can't recover on its own.
+const SECTION_NAMING_HINT =
+  "命名慣例：整個版面由上到下分成數個區塊；素材檔名的前綴代表它所屬的區塊。" +
+  "「s + 數字」開頭（例如 s1_logo.png、s2_banner.png）代表由上往下數第 N 個區塊，" +
+  "s1 在最上方、數字越大越往下；「footer」開頭（例如 footer_logo.png）代表版面最底部的頁尾區塊，" +
+  "永遠位在所有 sN 區塊之下。請把前綴當成該素材「垂直落在哪個區塊」的強提示：" +
+  "先據此鎖定所屬區塊，再靠圖像內容決定精確位置。沒有這種前綴的素材就純粹依圖像內容判斷。";
 
 const BOX_SCHEMA = {
   type: "ARRAY",
@@ -602,7 +691,7 @@ const BOX_SCHEMA = {
 
 // ---- A) Re-place the ticked assets ----
 aiFixBtn.addEventListener("click", async () => {
-  const picked = state.assets.map((a, i) => ({ a, i })).filter((p) => p.a.aiSel);
+  const picked = state.selection.map((i) => ({ a: state.assets[i], i })).filter((p) => p.a);
   if (!picked.length) return;
   aiFixBtn.disabled = true; aiCheckBtn.disabled = true;
 
@@ -615,7 +704,8 @@ aiFixBtn.addEventListener("click", async () => {
           "第一張圖是完整的版面示意圖。之後每張圖是一個素材，依序編號 asset_0、asset_1…。" +
           "請在示意圖中找出每個素材出現的位置，回傳 JSON 陣列，每個元素為 " +
           '{"index": 素材編號, "box_2d": [ymin, xmin, ymax, xmax]}，' +
-          "box_2d 是該素材在示意圖上的範圍，normalized 到 0-1000。" },
+          "box_2d 是該素材在示意圖上的範圍，normalized 到 0-1000。\n" +
+          SECTION_NAMING_HINT },
         imgToInlinePart(state.refImg, 1536),
       ];
       batch.forEach((p, bi) => {
@@ -629,9 +719,11 @@ aiFixBtn.addEventListener("click", async () => {
         if (!p || !Array.isArray(r.box_2d) || r.box_2d.length !== 4) continue;
         const rect = boxToRect(p.a, r.box_2d);
         p.a.x = rect.x; p.a.y = rect.y; p.a.w = rect.w; p.a.h = rect.h;
-        p.a.aiSel = false;
       }
     }
+    statusEl.textContent = "SSIM 微調位置中…";
+    await new Promise((r) => setTimeout(r, 0));
+    for (const p of picked) localRefine(p.a);   // snap each to the local SSIM optimum
     statusEl.textContent = "✓ AI 重新定位完成，可拖曳微調";
     renderLayerList(); draw(); saveSession();
   } catch (err) {
@@ -676,7 +768,9 @@ aiCheckBtn.addEventListener("click", async () => {
         "第一張圖是目標版面示意圖，第二張圖是目前的排版結果。" +
         "以下 JSON 是目前每個素材的位置（box_2d = [ymin, xmin, ymax, xmax]，normalized 0-1000）：\n" +
         JSON.stringify(layoutList) + "\n" +
-        "請逐一比對示意圖，判斷每個素材的位置是否正確。回傳 JSON 陣列，每個元素為 " +
+        SECTION_NAMING_HINT + "\n" +
+        "請逐一比對示意圖，判斷每個素材的位置是否正確" +
+        "（含檔名有「s + 數字」或「footer」前綴者是否落在對應區塊）。回傳 JSON 陣列，每個元素為 " +
         '{"index": 編號, "ok": true 或 false, "box_2d": [...]}；' +
         "ok 為 false 時 box_2d 必須給出該素材在示意圖上的正確位置，ok 為 true 時省略 box_2d。" },
       imgToInlinePart(state.refImg, 1536),
@@ -712,6 +806,7 @@ function applySuggest(idx) {
   beginChange();
   a.x = a.suggest.x; a.y = a.suggest.y; a.w = a.suggest.w; a.h = a.suggest.h;
   a.suggest = null;
+  localRefine(a);   // SSIM snap the position within a small window (size kept)
   renderLayerList(); draw(); saveSession();
 }
 
@@ -902,14 +997,17 @@ function toggleVisible(idx) {
   saveSession();
 }
 
-// Move a layer in the stacking order. dir = +1 toward front, -1 toward back.
-function moveLayer(idx, dir) {
-  const j = idx + dir;
-  if (j < 0 || j >= state.assets.length) return;
+// Drag-to-reorder: after a drop the panel's DOM order is the source of truth.
+// The panel shows front-most first, so state.assets is the reverse of DOM order.
+let dragEl = null;
+function commitReorderFromDom() {
+  const visual = [...layerList.querySelectorAll(".layer-item")].map((el) => el._asset).filter(Boolean);
+  if (visual.length !== state.assets.length) return;   // bg row / stale DOM — bail safely
+  const next = visual.slice().reverse();
+  if (next.every((a, k) => a === state.assets[k])) return;   // order unchanged
   beginChange();
-  const [a] = state.assets.splice(idx, 1);
-  state.assets.splice(j, 0, a);
-  state.selection = [];   // indices shift on reorder
+  state.assets = next;
+  state.selection = [];   // indices shifted on reorder
   renderLayerList();
   draw();
   saveSession();
@@ -924,62 +1022,71 @@ function renderLayerList() {
     const hidden = a.visible === false;
     const li = document.createElement("li");
     li.className = "layer-item" + (hidden ? " hidden-layer" : "") + (state.selection.includes(i) ? " selected" : "");
-
-    // Tick to queue this asset for "AI 重新定位".
-    const pick = document.createElement("input");
-    pick.type = "checkbox";
-    pick.className = "ai-pick";
-    pick.title = "勾選後可用「AI 重新定位」修正這張素材";
-    pick.checked = !!a.aiSel;
-    pick.addEventListener("change", () => { a.aiSel = pick.checked; updateAiButtons(); });
+    li._asset = a;                          // drag-reorder reads DOM order back through this
 
     const eye = document.createElement("button");
     eye.className = "eye-btn";
     eye.title = hidden ? "顯示" : "隱藏";
     eye.textContent = hidden ? "🙈" : "👁";
-    eye.addEventListener("click", () => toggleVisible(i));
+    eye.addEventListener("click", (e) => { e.stopPropagation(); toggleVisible(i); });
 
     const thumb = document.createElement("img");
     thumb.src = a.img.src;
-    thumb.style.cursor = "pointer";
-    thumb.addEventListener("click", () => selectAsset(i, false));
+    thumb.alt = "";
+    thumb.draggable = false;                // let the <li> own the drag, not the image
 
     const nm = document.createElement("span");
     nm.className = "nm";
     nm.textContent = a.name;
-    nm.addEventListener("click", () => selectAsset(i, false));
 
-    const order = document.createElement("span");
-    order.className = "order-btns";
-    const up = document.createElement("button");
-    up.className = "ord-btn"; up.title = "上移一層（往前）"; up.textContent = "▲";
-    up.disabled = i === state.assets.length - 1;
-    up.addEventListener("click", () => moveLayer(i, +1));
-    const down = document.createElement("button");
-    down.className = "ord-btn"; down.title = "下移一層（往後）"; down.textContent = "▼";
-    down.disabled = i === 0;
-    down.addEventListener("click", () => moveLayer(i, -1));
-    order.append(up, down);
-
-    li.append(pick, eye, thumb, nm, order);
+    li.append(eye, thumb, nm);
     if (a.suggest) {
-      // Double-check flagged this asset: show apply/dismiss instead of the
-      // score (the row is narrow — suggestion controls take priority).
+      // Double-check flagged this asset. The apply/dismiss controls live on
+      // their own full-width row below (.suggest-row) so they wrap downward
+      // instead of pushing the layer row off the edge of the panel.
+      const sgRow = document.createElement("div");
+      sgRow.className = "suggest-row";
       const bd = document.createElement("span");
       bd.className = "suggest-badge"; bd.textContent = "建議移動";
       const ap = document.createElement("button");
       ap.className = "mini-btn"; ap.textContent = "套用";
       ap.title = "移動到畫布上綠色虛線框的位置";
-      ap.addEventListener("click", () => applySuggest(i));
+      ap.addEventListener("click", (e) => { e.stopPropagation(); applySuggest(i); });
       const ig = document.createElement("button");
       ig.className = "mini-btn dismiss"; ig.textContent = "忽略";
-      ig.addEventListener("click", () => dismissSuggest(i));
-      li.insertBefore(bd, order); li.insertBefore(ap, order); li.insertBefore(ig, order);
+      ig.addEventListener("click", (e) => { e.stopPropagation(); dismissSuggest(i); });
+      sgRow.append(bd, ap, ig);
+      li.appendChild(sgRow);
     } else if (a.score != null) {
       const sc = document.createElement("span");
       sc.className = "score"; sc.textContent = "ssim " + (a.score * 100).toFixed(1) + "%";
-      li.insertBefore(sc, order);
+      li.appendChild(sc);
     }
+
+    // Click to select; Shift-click adds/removes from the multi-selection.
+    li.addEventListener("click", (e) => selectAsset(i, e.shiftKey));
+
+    // Drag the whole row to reorder the stacking order (replaces the ▲▼ buttons).
+    li.draggable = true;
+    li.addEventListener("dragstart", (e) => {
+      dragEl = li; li.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", "");   // Firefox won't start a drag without data
+    });
+    li.addEventListener("dragover", (e) => {
+      if (!dragEl || dragEl === li) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      const r = li.getBoundingClientRect();
+      const after = e.clientY > r.top + r.height / 2;
+      layerList.insertBefore(dragEl, after ? li.nextSibling : li);
+    });
+    li.addEventListener("dragend", () => {
+      li.classList.remove("dragging");
+      dragEl = null;
+      commitReorderFromDom();
+    });
+
     layerList.appendChild(li);
   }
 
@@ -989,6 +1096,8 @@ function renderLayerList() {
     li.innerHTML = `<img src="${state.bg.img.src}" alt=""><span class="nm">${state.bg.name} (底圖)</span>`;
     layerList.appendChild(li);
   }
+
+  updateAiButtons();   // "AI 重新定位" is gated on the current selection
 }
 
 // ============================================================
