@@ -235,13 +235,14 @@ function renderAssets(d) {
   const single = state.selection.length === 1 ? state.selection[0] : -1;
   state.assets.forEach((a, i) => {
     if (a.visible === false) return;
+    const sugFocus = !!a.suggest && i === single;   // the flagged asset being reviewed
     const elDiv = document.createElement("div");
-    elDiv.className = "asset-el" + (state.selection.includes(i) ? " selected" : "");
+    elDiv.className = "asset-el" + (state.selection.includes(i) ? " selected" : "") + (sugFocus ? " suggest-current" : "");
     elDiv.dataset.idx = i;
     elDiv.style.left = pct(a.x, W) + "%";
     elDiv.style.top = pct(a.y, H) + "%";
     elDiv.style.width = pct(a.w, W) + "%";
-    elDiv.style.zIndex = i + 1;
+    elDiv.style.zIndex = sugFocus ? 40 : i + 1;
     const im = document.createElement("img");
     im.src = a.img.src; im.draggable = false; im.alt = a.name;
     elDiv.appendChild(im);
@@ -256,14 +257,37 @@ function renderAssets(d) {
 
     if (a.suggest) {
       const sg = document.createElement("div");
-      sg.className = "sel-suggest";
+      sg.className = "sel-suggest" + (sugFocus ? " active" : "");
       sg.style.left = pct(a.suggest.x, W) + "%";
       sg.style.top = pct(a.suggest.y, H) + "%";
       sg.style.width = pct(a.suggest.w, W) + "%";
       sg.style.height = pct(a.suggest.h, H) + "%";
+      if (sugFocus) {
+        // a semi-transparent copy of the asset so you see WHAT moves there
+        const ghost = document.createElement("img");
+        ghost.className = "suggest-ghost"; ghost.src = a.img.src; ghost.draggable = false; ghost.alt = "";
+        sg.appendChild(ghost);
+      }
       assetLayer.appendChild(sg);
     }
   });
+
+  // Arrow linking the reviewed asset's current centre → its suggested centre.
+  const fa = single >= 0 ? state.assets[single] : null;
+  if (fa && fa.suggest && fa.visible !== false) {
+    const x1 = fa.x + fa.w / 2, y1 = fa.y + fa.h / 2;
+    const x2 = fa.suggest.x + fa.suggest.w / 2, y2 = fa.suggest.y + fa.suggest.h / 2;
+    const s = Math.max(4, W / 240);
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "suggest-arrow");
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.innerHTML =
+      `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#f5a623" stroke-width="${s}" ` +
+      `stroke-dasharray="${s * 2.4} ${s * 1.6}" stroke-linecap="round"/>` +
+      `<circle cx="${x1}" cy="${y1}" r="${s * 1.3}" fill="#f5a623"/>`;
+    assetLayer.appendChild(svg);
+  }
 }
 
 function renderGuides(guides) {
@@ -496,6 +520,7 @@ function pyramidMatchAsset(a, p, band) {
 
 autoPlaceBtn.addEventListener("click", async () => {
   autoPlaceBtn.disabled = true;
+  setBusy(true);
   statusEl.textContent = "分析示意圖中…";
   await new Promise((r) => setTimeout(r, 30));
 
@@ -519,6 +544,7 @@ autoPlaceBtn.addEventListener("click", async () => {
     statusEl.textContent = "⚠ 定位失敗：" + (err && err.message ? err.message : err);
   } finally {
     autoPlaceBtn.disabled = false;
+    setBusy(false);
   }
 });
 
@@ -628,20 +654,22 @@ function boxToRect(a, box) {
 // Local SSIM snap after an AI placement. AI gets the SIZE (native) and section
 // right but the position can be a few px off; this slides the asset to the best
 // SSIM match in a SMALL window around it — size is never touched. Right scale +
-// tiny window + right region is exactly where SSIM is reliable. The scale is
-// picked per asset so the template's long side ≈ REFINE_TARGET, which bounds the
-// cost no matter how large the asset is. Only the reference sub-region is read.
-const REFINE_TARGET = 100;   // template long-side after scaling (keeps the SSIM cost bounded)
-const REFINE_RADIUS = 30;    // search radius in SCALED px — a small window (2·radius wide)
+// tiny window + right region is exactly where SSIM is reliable. Only the
+// reference sub-region is read, so the cost stays bounded. A confidence guard
+// (REFINE_MIN_GAIN) leaves low-contrast / ambiguous assets where AI put them.
+const REFINE_GEO = 90;        // template √area after scaling. Scaling by √(w·h) (not the long
+                              //   side) keeps BOTH axes localisable — long-side scaling crushes a
+                              //   wide/short text banner to a few px tall — and, since √area is
+                              //   fixed, it also bounds the SSIM cost per asset.
+const REFINE_RADIUS = 30;     // search radius in SCALED px — a small window (2·radius wide)
+const REFINE_MIN_GAIN = 0.05; // confidence guard: only move if SSIM beats the AI position by this
+                              //   much. Low-contrast / ambiguous assets have a flat, noisy SSIM
+                              //   map, so the "best" spot is meaningless — leave AI's position.
 function localRefine(a) {
   const LW = state.layoutW, LH = state.layoutH;
   if (!state.refImg || !a.img || a.w < 2 || a.h < 2) return;
-  // Scale so the template long-side ≈ REFINE_TARGET; the scan window is then a
-  // fixed ±REFINE_RADIUS in scaled px, so cost stays bounded for any asset size
-  // (a larger asset just means a larger design-space search radius, and vice
-  // versa). This keeps the search a genuinely SMALL window near the AI spot.
-  const sf = Math.min(1, REFINE_TARGET / Math.max(a.w, a.h));
-  const Rd = REFINE_RADIUS / sf;   // design-space radius
+  const sf = Math.min(1, REFINE_GEO / Math.sqrt(a.w * a.h));
+  const Rd = REFINE_RADIUS / sf;   // design-space radius (small asset → small radius, and vice versa)
   const rx0 = Math.max(0, a.x - Rd), ry0 = Math.max(0, a.y - Rd);
   const rx1 = Math.min(LW, a.x + a.w + Rd), ry1 = Math.min(LH, a.y + a.h + Rd);
   const regW = rx1 - rx0, regH = ry1 - ry0;
@@ -658,8 +686,13 @@ function localRefine(a) {
   _scaleCtx.drawImage(rimg, rx0 * kx, ry0 * ky, regW * kx, regH * ky, 0, 0, sw, sh);
   const rdata = _scaleCtx.getImageData(0, 0, sw, sh).data;
   const td = getScaledData(a.img, tw, th).data;
+  // Score at the AI position (window is centred on it) vs the window's best.
+  const sx = Math.max(0, Math.min(sw - tw, Math.round((a.x - rx0) * sf)));
+  const sy = Math.max(0, Math.min(sh - th, Math.round((a.y - ry0) * sf)));
+  const startScore = scanWindow(rdata, sw, td, tw, th, sx, sx, sy, sy, -Infinity).score;
   const m = scanWindow(rdata, sw, td, tw, th, 0, sw - tw, 0, sh - th, -Infinity);
   if (m.score === -Infinity) return;
+  if (m.score - startScore < REFINE_MIN_GAIN) return;   // no confident gain → keep the AI position
   a.x = rx0 + m.x / sf;   // top-left in region px → design space
   a.y = ry0 + m.y / sf;
   a.score = m.score;
@@ -689,13 +722,15 @@ const BOX_SCHEMA = {
   },
 };
 
-// ---- A) Re-place the ticked assets ----
+// ---- A) Propose new positions for the SELECTED assets (review before applying) ----
 aiFixBtn.addEventListener("click", async () => {
   const picked = state.selection.map((i) => ({ a: state.assets[i], i })).filter((p) => p.a);
   if (!picked.length) return;
-  aiFixBtn.disabled = true; aiCheckBtn.disabled = true;
+  aiFixBtn.disabled = true; aiCheckBtn.disabled = true; setBusy(true);
 
   try {
+    state.assets.forEach((a) => { a.suggest = null; });   // start a fresh review set
+    let flagged = 0;
     for (let b = 0; b < picked.length; b += AI_BATCH) {
       const batch = picked.slice(b, b + AI_BATCH);
       statusEl.textContent = `AI 重新定位中… (${Math.min(b + AI_BATCH, picked.length)}/${picked.length})`;
@@ -717,20 +752,21 @@ aiFixBtn.addEventListener("click", async () => {
       for (const r of Array.isArray(out) ? out : []) {
         const p = batch[r.index];
         if (!p || !Array.isArray(r.box_2d) || r.box_2d.length !== 4) continue;
-        const rect = boxToRect(p.a, r.box_2d);
-        p.a.x = rect.x; p.a.y = rect.y; p.a.w = rect.w; p.a.h = rect.h;
+        p.a.suggest = boxToRect(p.a, r.box_2d);   // propose for review — don't move yet
+        flagged++;
       }
     }
-    statusEl.textContent = "SSIM 微調位置中…";
-    await new Promise((r) => setTimeout(r, 0));
-    for (const p of picked) localRefine(p.a);   // snap each to the local SSIM optimum
-    statusEl.textContent = "✓ AI 重新定位完成，可拖曳微調";
-    renderLayerList(); draw(); saveSession();
+    statusEl.textContent = flagged
+      ? `AI 重新定位完成：${flagged} 項建議，逐項確認`
+      : "AI 重新定位完成：沒有可套用的建議";
+    renderLayerList(); draw();
+    focusNextSuggest();   // jump to the first proposal for review
   } catch (err) {
     console.error(err);
     statusEl.textContent = "⚠ AI 定位失敗：" + (err && err.message ? err.message : err);
   } finally {
     updateAiButtons();
+    setBusy(false);
   }
 });
 
@@ -749,7 +785,7 @@ const CHECK_SCHEMA = {
 };
 
 aiCheckBtn.addEventListener("click", async () => {
-  aiFixBtn.disabled = true; aiCheckBtn.disabled = true;
+  aiFixBtn.disabled = true; aiCheckBtn.disabled = true; setBusy(true);
   statusEl.textContent = "AI 全面檢查中…";
 
   try {
@@ -787,19 +823,27 @@ aiCheckBtn.addEventListener("click", async () => {
       flagged++;
     }
     statusEl.textContent = flagged
-      ? `AI 檢查完成：${flagged} 項疑似錯位，請在左側逐項確認`
+      ? `AI 檢查完成：${flagged} 項疑似錯位，已定位到第一項，逐項確認`
       : "✓ AI 檢查完成：全部位置正確";
     renderLayerList(); draw();
+    focusNextSuggest();   // jump to the first flagged asset so it's immediately visible
   } catch (err) {
     console.error(err);
     statusEl.textContent = "⚠ AI 檢查失敗：" + (err && err.message ? err.message : err);
   } finally {
     updateAiButtons();
+    setBusy(false);
   }
 });
 
 // Apply / dismiss a double-check suggestion (suggest is transient UI state —
 // it is deliberately NOT persisted to IndexedDB).
+// After handling one suggestion, jump to the next flagged asset (focused review).
+function focusNextSuggest() {
+  const i = state.assets.findIndex((a) => a.suggest);
+  if (i >= 0) selectAsset(i, false);
+}
+
 function applySuggest(idx) {
   const a = state.assets[idx];
   if (!a || !a.suggest) return;
@@ -808,6 +852,7 @@ function applySuggest(idx) {
   a.suggest = null;
   localRefine(a);   // SSIM snap the position within a small window (size kept)
   renderLayerList(); draw(); saveSession();
+  focusNextSuggest();
 }
 
 function dismissSuggest(idx) {
@@ -815,6 +860,7 @@ function dismissSuggest(idx) {
   if (!a) return;
   a.suggest = null;
   renderLayerList(); draw();
+  focusNextSuggest();
 }
 
 // ============================================================
@@ -829,6 +875,12 @@ function selectAsset(i, additive) {
     state.selection = [i];
   }
   renderLayerList(); draw();
+  // Focused suggestion review: scroll the flagged asset into view on the board.
+  const a = state.assets[i];
+  if (!additive && a && a.suggest) {
+    const el = assetLayer.querySelector('.asset-el[data-idx="' + i + '"]');
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+  }
 }
 function clearSelection() {
   if (!state.selection.length) return;
@@ -880,8 +932,12 @@ function boardMetrics() {
 
 let itx = null;   // active interaction: move or resize
 
+// While an auto-positioning pass (SSIM / AI) runs, lock the board so the user
+// can't drag an asset out from under the placement that's being written.
+function setBusy(v) { state.busy = v; board.classList.toggle("busy", v); }
+
 board.addEventListener("mousedown", (e) => {
-  if (!state.bg) return;
+  if (!state.bg || state.busy) return;
   const handle = e.target.closest(".handle");
   const elDiv = e.target.closest(".asset-el");
   const { k } = boardMetrics();
