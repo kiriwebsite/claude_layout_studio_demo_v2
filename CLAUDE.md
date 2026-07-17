@@ -7,9 +7,6 @@
 多數定位自己讀就好，別過度委派。
 
 ## 紅線（不讀其他檔也要遵守）
-- **純前端 vanilla JS，零相依、零建置**：沒有 package.json 是刻意的。
-  禁止引入框架（React/Vue…）、npm 套件、bundler、build step。
-  新功能就用原生 DOM/Canvas API 加進既有檔案。
 - **相容性**：目標瀏覽器 Chrome/Edge/Safari，Firefox 需相容（素材上傳走
   `filesInput` 多檔 fallback，不是只靠資料夾 `folderInput`）。改上傳流程別弄壞 Firefox 路徑。
 - **副作用幾乎都在本地，可放心實跑**：IndexedDB 自動存檔、下載 zip、
@@ -17,8 +14,11 @@
   **這個專案沒有「會寫正式資料」的危險路徑**，全域那套部署/副作用謹慎在這裡不適用。
   唯一例外（2026-07-09 起）：Gemini AI 輔助定位會把示意圖/素材圖送到
   Google generativelanguage API——但只在使用者自己填了 API key 並主動按
-  「AI 重新定位 / AI 全面檢查」時才發送，key 存 localStorage（`gemini-key`）。
-  除這兩個按鈕外，禁止新增其他對外網路呼叫。
+  「AI 選取定位 / AI 全面檢查」時才發送，key 存 localStorage（`gemini-key`）。
+  第二個例外（2026-07-15 起）：每次 Gemini 呼叫成功後，`logAiUsage()` 會
+  fire-and-forget POST token 用量到 `mapi.icantw.com/api/ai-usage-logs`（只送
+  model/feature/token 數，不含圖片或內容；失敗只 console.warn，不影響定位流程）。
+  除上述 Gemini 兩鍵與這個用量回報外，禁止新增其他對外網路呼叫。
 - **commit 慣例**：既有 2 個 commit 為中英混合描述式、**無 AI 署名**；
   跟隨此慣例（與全域預設的 Co-Authored-By 不同，以專案慣例為準）。使用者自己 push。
 

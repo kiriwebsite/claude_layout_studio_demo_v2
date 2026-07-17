@@ -65,6 +65,14 @@ refOpacitySlider.addEventListener("input", () => {
   draw();
 });
 
+// The layers panel sticks below the sticky controls bar. The bar's height
+// varies (flex-wrap on narrow windows), so publish it as --controls-h for
+// the panel's sticky offset instead of hardcoding it in CSS.
+const controlsBar = document.querySelector(".controls");
+new ResizeObserver(() => {
+  document.documentElement.style.setProperty("--controls-h", controlsBar.offsetHeight + "px");
+}).observe(controlsBar);
+
 // ============================================================
 // File loading helpers
 // ============================================================
@@ -153,18 +161,22 @@ async function processAssetFiles(fileList) {
 }
 
 function tryEnableAutoPlace() {
-  const ready = state.refImg && state.bg;
-  autoPlaceBtn.disabled = !ready;
   downloadBtn.disabled = !(state.bg && state.assets.length);
-  updateAiButtons();
+  updateAiButtons();   // owns autoPlaceBtn too, so the review-gate below covers it
 }
 
-// AI buttons need everything SSIM needs PLUS an API key; re-place also
-// needs at least one asset selected in the layer panel (click / Shift-click).
+// Placement buttons need refImg+bg (SSIM auto-place) or that PLUS an API key and
+// a selection (AI). While a review set is still open (any a.suggest unresolved),
+// ALL of them stay disabled — re-triggering would wipe the pending suggestions
+// mid-review and, for the AI buttons, fire a redundant Gemini call. This is the
+// single choke point (applySuggest/dismissSuggest re-run it via renderLayerList),
+// so every button re-enables once the last suggestion is resolved.
 function updateAiButtons() {
+  const reviewing = state.assets.some((a) => a.suggest);
+  autoPlaceBtn.disabled = !(state.refImg && state.bg) || reviewing;
   const ready = state.refImg && state.bg && state.assets.length && geminiKeyInput.value.trim();
-  aiCheckBtn.disabled = !ready;
-  aiFixBtn.disabled = !(ready && state.selection.length);
+  aiCheckBtn.disabled = !ready || reviewing;
+  aiFixBtn.disabled = !(ready && state.selection.length) || reviewing;
 }
 
 function defaultLayout() {
@@ -554,7 +566,7 @@ function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 // Gemini AI assisted placement (second-pass fix after SSIM)
 // ----------------------------------------------------------
 // Two user-chosen paths:
-//  A) tick misplaced assets in the layer panel → "AI 重新定位" asks Gemini
+//  A) tick misplaced assets in the layer panel → "AI 選取定位" asks Gemini
 //     to locate each ticked asset inside the reference and applies directly.
 //  B) "AI 全面檢查" (double check) sends the reference + current layout and
 //     asks which assets look misplaced; results become per-asset suggestions
@@ -603,9 +615,39 @@ function currentLayoutPart(maxDim = 1536) {
   return { inline_data: { mime_type: "image/png", data: c.toDataURL("image/png").split(",")[1] } };
 }
 
+// Central token-usage ledger. Every Gemini call reports its usageMetadata here
+// so AI cost is tracked in one place (api_usage_logs). Fire-and-forget: this is
+// the ONLY non-Gemini outbound call, it must never block or break the placement
+// flow. A CORS failure (this app can run from file://, Origin: null) or any HTTP
+// error is swallowed with a console.warn — the user's work is unaffected.
+const AI_USAGE_LOG_URL = "https://mapi.icantw.com/api/ai-usage-logs";
+function logAiUsage(model, feature, usage) {
+  if (!usage) return;                                   // no metadata → nothing to log
+  const prompt = usage.promptTokenCount || 0;
+  const total = usage.totalTokenCount || 0;
+  // completion = total − prompt so thinking tokens (2.5-flash thoughtsTokenCount,
+  // not in candidatesTokenCount) are counted; fall back to candidates if no total.
+  const completion = total ? Math.max(0, total - prompt) : (usage.candidatesTokenCount || 0);
+  fetch(AI_USAGE_LOG_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+    body: JSON.stringify({
+      service_name: "gemini",
+      model_name: model,
+      feature_name: feature,
+      source: location.hostname || "layout_studio",
+      prompt_tokens: prompt,
+      completion_tokens: completion,
+      total_tokens: total || prompt + completion,
+      response_metadata: { usage },
+    }),
+  }).catch((e) => console.warn("AI usage log failed", e));
+}
+
 // One generateContent call with structured JSON output. Throws with a
-// user-facing message on failure; callers surface it via statusEl.
-async function geminiCall(parts, responseSchema) {
+// user-facing message on failure; callers surface it via statusEl. `feature`
+// labels the call site (ai_replace / ai_double_check) in the usage ledger.
+async function geminiCall(parts, responseSchema, feature) {
   const key = geminiKeyInput.value.trim();
   const model = geminiModelSelect.value;
   const res = await fetch(
@@ -628,6 +670,7 @@ async function geminiCall(parts, responseSchema) {
     throw new Error(apiMsg || "HTTP " + res.status);
   }
   const data = await res.json();
+  logAiUsage(model, feature, data.usageMetadata);       // record tokens regardless of parse outcome
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) throw new Error("Gemini 回應為空");
   return JSON.parse(text);
@@ -733,7 +776,7 @@ aiFixBtn.addEventListener("click", async () => {
     let flagged = 0;
     for (let b = 0; b < picked.length; b += AI_BATCH) {
       const batch = picked.slice(b, b + AI_BATCH);
-      statusEl.textContent = `AI 重新定位中… (${Math.min(b + AI_BATCH, picked.length)}/${picked.length})`;
+      statusEl.textContent = `AI 選取定位中… (${Math.min(b + AI_BATCH, picked.length)}/${picked.length})`;
       const parts = [
         { text:
           "第一張圖是完整的版面示意圖。之後每張圖是一個素材，依序編號 asset_0、asset_1…。" +
@@ -748,7 +791,7 @@ aiFixBtn.addEventListener("click", async () => {
         parts.push(imgToInlinePart(p.a.img, 512));
       });
 
-      const out = await geminiCall(parts, BOX_SCHEMA);
+      const out = await geminiCall(parts, BOX_SCHEMA, "ai_replace");
       for (const r of Array.isArray(out) ? out : []) {
         const p = batch[r.index];
         if (!p || !Array.isArray(r.box_2d) || r.box_2d.length !== 4) continue;
@@ -757,8 +800,8 @@ aiFixBtn.addEventListener("click", async () => {
       }
     }
     statusEl.textContent = flagged
-      ? `AI 重新定位完成：${flagged} 項建議，逐項確認`
-      : "AI 重新定位完成：沒有可套用的建議";
+      ? `AI 選取定位完成：${flagged} 項建議，逐項確認`
+      : "AI 選取定位完成：沒有可套用的建議";
     renderLayerList(); draw();
     focusNextSuggest();   // jump to the first proposal for review
   } catch (err) {
@@ -813,7 +856,7 @@ aiCheckBtn.addEventListener("click", async () => {
       currentLayoutPart(),
     ];
 
-    const out = await geminiCall(parts, CHECK_SCHEMA);
+    const out = await geminiCall(parts, CHECK_SCHEMA, "ai_double_check");
     state.assets.forEach((a) => { a.suggest = null; });
     let flagged = 0;
     for (const r of Array.isArray(out) ? out : []) {
@@ -924,6 +967,29 @@ function deleteSelected() {
   renderLayerList(); draw(); saveSession();
 }
 
+// Arrow-key nudge (Figma-style): move the whole selection by NUDGE_STEP layout
+// px, Shift doubles the step. Consecutive nudges coalesce into ONE undo step —
+// beginChange fires only when a run starts, and an idle timer closes the run so
+// the next press after a pause opens a fresh step (mirrors the one-per-drag rule).
+const NUDGE_STEP = 1;
+let nudgeRunActive = false;
+let nudgeIdleTimer = null;
+function nudgeSelection(dx, dy) {
+  if (!state.selection.length) return;
+  if (!nudgeRunActive) { beginChange(); nudgeRunActive = true; }
+  clearTimeout(nudgeIdleTimer);
+  // Persist once the run goes idle (like save-on-mouseup), not per keypress —
+  // holding an arrow key auto-repeats and would otherwise thrash IndexedDB.
+  nudgeIdleTimer = setTimeout(() => { nudgeRunActive = false; saveSession(); }, 500);
+  const W = state.layoutW, H = state.layoutH;
+  for (const idx of state.selection) {
+    const a = state.assets[idx];
+    a.x = clamp(a.x + dx, 0, W - a.w);
+    a.y = clamp(a.y + dy, 0, H - a.h);
+  }
+  renderLayerList(); draw();
+}
+
 // layout px per rendered px, plus the board's screen rect (for pointer math).
 function boardMetrics() {
   const rect = board.getBoundingClientRect();
@@ -1029,13 +1095,24 @@ function resizeTo(e) {
   a.w = w; a.h = h; a.x = clamp(x, 0, W - w); a.y = clamp(y, 0, H - h);
 }
 
-// Keyboard: Delete removes selection; Ctrl/Cmd+Z undo, +Shift or Ctrl+Y redo.
+// Keyboard: arrows nudge selection (Shift = 2×); Delete removes selection;
+// Ctrl/Cmd+Z undo, +Shift or Ctrl+Y redo.
+const NUDGE_DIRS = {
+  ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
+};
 window.addEventListener("keydown", (e) => {
   const tag = (document.activeElement && document.activeElement.tagName) || "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
   const meta = e.ctrlKey || e.metaKey;
   if (meta && (e.key === "z" || e.key === "Z")) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if (meta && (e.key === "y" || e.key === "Y")) { e.preventDefault(); redo(); return; }
+  const dir = NUDGE_DIRS[e.key];
+  if (dir && !meta && state.selection.length) {
+    e.preventDefault();
+    const step = NUDGE_STEP * (e.shiftKey ? 2 : 1);
+    nudgeSelection(dir[0] * step, dir[1] * step);
+    return;
+  }
   if ((e.key === "Delete" || e.key === "Backspace") && state.selection.length) { e.preventDefault(); deleteSelected(); }
 });
 
@@ -1153,7 +1230,7 @@ function renderLayerList() {
     layerList.appendChild(li);
   }
 
-  updateAiButtons();   // "AI 重新定位" is gated on the current selection
+  updateAiButtons();   // "AI 選取定位" is gated on the current selection
 }
 
 // ============================================================
@@ -1494,3 +1571,96 @@ resetBtn.addEventListener("click", async () => {
 
 // Restore any previous session as soon as the page loads.
 restoreSession();
+
+// ============================================================
+// Decorative backdrop: a morphing neon blob that wanders behind
+// the page. Pure canvas (no libs); sits behind all content
+// (z-index -1, pointer-events none) so it can't interfere with the
+// editor. Honors prefers-reduced-motion by rendering a still frame.
+// ============================================================
+(function blobBackdrop() {
+  const cv = el("fluidCanvas");
+  if (!cv) return;
+  const fx = cv.getContext("2d");
+  let W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = cv.clientWidth; H = cv.clientHeight;
+    cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+    fx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+
+  // Outline = base radius modulated by low-order harmonics drifting in
+  // time ([angular order, relative amp, time speed, phase]) — the shape
+  // keeps morphing but stays smooth and roughly round.
+  const HARM = [
+    [3, .08, .00042, 0.0],
+    [5, .05, -.00031, 2.1],
+    [7, .03, .00057, 4.4],
+  ];
+
+  function blobRadius(a, R, t) {
+    let r = R;
+    for (const [n, amp, v, p] of HARM) r += R * amp * Math.sin(n * a + p + t * v);
+    return r;
+  }
+
+  function tracePath(cx, cy, R, t) {
+    const STEPS = 120;
+    for (let i = 0; i <= STEPS; i++) {
+      const a = (i / STEPS) * Math.PI * 2;
+      const r = blobRadius(a, R, t);
+      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+      if (i === 0) fx.moveTo(x, y); else fx.lineTo(x, y);
+    }
+  }
+
+  // Feathered silhouette of the morphing outline: draw the path fully
+  // offscreen and let its blurred shadow land onscreen — soft edges with
+  // no ctx.filter (Safari-safe). Shadow offset/blur ignore the CTM, so
+  // they're given in device px (× DPR).
+  function softFill(cx, cy, R, t, scale, blur, color) {
+    const off = H + R * 2;
+    fx.save();
+    fx.beginPath();
+    tracePath(cx, cy - off, R * scale, t);
+    fx.closePath();
+    fx.shadowOffsetY = off * DPR;
+    fx.shadowBlur = blur * DPR;
+    fx.shadowColor = color;
+    fx.fillStyle = "#000";
+    fx.fill();
+    fx.restore();
+  }
+
+  function paint(t) {
+    fx.clearRect(0, 0, W, H);
+    // Slow Lissajous drift keeps the blob roaming the whole viewport
+    // without ever repeating an obvious loop.
+    const cx = W * (.5 + .38 * Math.sin(t * .000037 + .8));
+    const cy = H * (.5 + .34 * Math.sin(t * .000053 + 2.0));
+    const R = Math.min(W, H) * (.204 + .036 * Math.sin(t * .00006));
+
+    // Two blurred silhouettes (outer cyan, inner mint) + a soft core whose
+    // gradient hits zero alpha well inside the outline — translucent
+    // gradient throughout, no stroke, no hard edge anywhere.
+    softFill(cx, cy, R, t, 1.0, 60, "rgba(0, 224, 255, .10)");
+    softFill(cx, cy, R, t, .78, 44, "rgba(53, 240, 176, .09)");
+    const g = fx.createRadialGradient(cx, cy, 0, cx, cy, R * .62);
+    g.addColorStop(0, "rgba(140, 245, 255, .15)");
+    g.addColorStop(1, "rgba(0, 224, 255, 0)");
+    fx.fillStyle = g;
+    fx.beginPath();
+    fx.arc(cx, cy, R * .62, 0, Math.PI * 2);
+    fx.fill();
+  }
+
+  window.addEventListener("resize", () => { resize(); paint(performance.now()); });
+  resize();
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    paint(0);
+  } else {
+    requestAnimationFrame(function loop(t) { paint(t); requestAnimationFrame(loop); });
+  }
+})();

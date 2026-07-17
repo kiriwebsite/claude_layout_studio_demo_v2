@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <canvas id="fluidCanvas" class="fluid-bg" aria-hidden="true"></canvas>
   <header class="topbar">
     <h1>Layout Studio</h1>
     <p class="subtitle">用 SSIM（Structural Similarity）把素材依示意圖自動定位成切版</p>
@@ -44,10 +45,11 @@
       <span class="ai-group">
         <input type="password" id="geminiKey" placeholder="Gemini API key" autocomplete="off" />
         <select id="geminiModel" title="Gemini 模型">
+          <option value="gemini-3.5-flash">gemini-3.5-flash</option>
           <option value="gemini-2.5-flash">gemini-2.5-flash</option>
           <option value="gemini-2.5-pro">gemini-2.5-pro</option>
         </select>
-        <button id="aiFixBtn" class="primary-btn small" disabled title="在左側素材清單點選（可 Shift 多選）定位錯誤的素材後，交給 Gemini 重新定位">AI 重新定位</button>
+        <button id="aiFixBtn" class="primary-btn small" disabled title="在左側素材清單點選（可 Shift 多選）定位錯誤的素材後，交給 Gemini 視覺定位，列出建議逐項確認後套用">AI 選取定位</button>
         <button id="aiCheckBtn" class="primary-btn small" disabled title="讓 Gemini 掃描全部素材位置，列出疑似錯位的建議，逐項確認後套用">AI 全面檢查</button>
       </span>
       <span class="ctrl-hint">定位後可拖曳微調；降低示意圖透明度即可看清素材是否對齊</span>
