@@ -180,15 +180,25 @@ function updateAiButtons() {
 }
 
 function defaultLayout() {
-  let y = 16;
+  // Tile in rows, wrapping inside the board width; a single column runs off
+  // the bottom as soon as the assets outgrow the design height.
+  const M = 16;
+  let x = M, y = M, rowH = 0;
   for (const a of state.assets) {
     const maxW = state.layoutW * 0.4;
     const s = a.nativeW > maxW ? maxW / a.nativeW : 1;
     a.w = a.nativeW * s;
     a.h = a.nativeH * s;
-    a.x = 16;
-    a.y = y;
-    y += a.h + 16;
+    if (x > M && x + a.w > state.layoutW - M) { x = M; y += rowH + M; rowH = 0; }
+    a.x = x; a.y = y;
+    x += a.w + M;
+    rowH = Math.max(rowH, a.h);
+  }
+  // Still too tall? Shrink the whole staging grid uniformly to fit the board.
+  const usedH = y + rowH + M;
+  if (usedH > state.layoutH) {
+    const k = state.layoutH / usedH;
+    for (const a of state.assets) { a.x *= k; a.y *= k; a.w *= k; a.h *= k; }
   }
 }
 
@@ -279,6 +289,20 @@ function renderAssets(d) {
         const ghost = document.createElement("img");
         ghost.className = "suggest-ghost"; ghost.src = a.img.src; ghost.draggable = false; ghost.alt = "";
         sg.appendChild(ghost);
+        // On-board confirm: same resolution paths as the layer-panel buttons.
+        // stopPropagation keeps the board's drag/selection handlers out of it.
+        const acts = document.createElement("div");
+        acts.className = "sug-actions";
+        const ok = document.createElement("button");
+        ok.type = "button"; ok.className = "sug-btn ok"; ok.textContent = "✓"; ok.title = "套用建議";
+        const no = document.createElement("button");
+        no.type = "button"; no.className = "sug-btn no"; no.textContent = "✕"; no.title = "忽略建議";
+        for (const [btn, fn] of [[ok, applySuggest], [no, dismissSuggest]]) {
+          btn.addEventListener("mousedown", (e) => e.stopPropagation());
+          btn.addEventListener("click", (e) => { e.stopPropagation(); fn(i); });
+        }
+        acts.append(ok, no);
+        sg.appendChild(acts);
       }
       assetLayer.appendChild(sg);
     }
@@ -294,10 +318,20 @@ function renderAssets(d) {
     svg.setAttribute("class", "suggest-arrow");
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
     svg.setAttribute("preserveAspectRatio", "none");
+    // Magenta (current) → mint (target) gradient, with flowing dashes unless
+    // the user prefers reduced motion (SMIL keeps the dash period in viewBox
+    // units, which vary per layout — CSS keyframes can't).
+    const dashAnim = matchMedia("(prefers-reduced-motion: reduce)").matches
+      ? ""
+      : `<animate attributeName="stroke-dashoffset" from="0" to="${-(s * 4)}" dur="0.9s" repeatCount="indefinite"/>`;
     svg.innerHTML =
-      `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#f5a623" stroke-width="${s}" ` +
-      `stroke-dasharray="${s * 2.4} ${s * 1.6}" stroke-linecap="round"/>` +
-      `<circle cx="${x1}" cy="${y1}" r="${s * 1.3}" fill="#f5a623"/>`;
+      `<defs><linearGradient id="sugGrad" gradientUnits="userSpaceOnUse" ` +
+      `x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}">` +
+      `<stop offset="0" stop-color="#ff3b8b"/><stop offset="1" stop-color="#35f0b0"/></linearGradient></defs>` +
+      `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="url(#sugGrad)" stroke-width="${s}" ` +
+      `stroke-dasharray="${s * 2.4} ${s * 1.6}" stroke-linecap="round">${dashAnim}</line>` +
+      `<circle cx="${x1}" cy="${y1}" r="${s * 1.3}" fill="#ff3b8b"/>` +
+      `<circle cx="${x2}" cy="${y2}" r="${s * 1.6}" fill="none" stroke="#35f0b0" stroke-width="${s * .6}"/>`;
     assetLayer.appendChild(svg);
   }
 }
@@ -657,7 +691,10 @@ async function geminiCall(parts, responseSchema, feature) {
       headers: { "Content-Type": "application/json", "x-goog-api-key": key },
       body: JSON.stringify({
         contents: [{ parts }],
-        generationConfig: { responseMimeType: "application/json", responseSchema },
+        // temperature 0 = greedy decoding: the same layout in → the same
+        // suggestions out (Gemini's default of 1.0 samples randomly, which
+        // made repeat runs disagree on identical input).
+        generationConfig: { responseMimeType: "application/json", responseSchema, temperature: 0 },
       }),
     }
   );
@@ -1096,7 +1133,7 @@ function resizeTo(e) {
 }
 
 // Keyboard: arrows nudge selection (Shift = 2×); Delete removes selection;
-// Ctrl/Cmd+Z undo, +Shift or Ctrl+Y redo.
+// Ctrl/Cmd+Z undo, +Shift or Ctrl+Y redo; Ctrl/Cmd+A selects every visible asset.
 const NUDGE_DIRS = {
   ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
 };
@@ -1106,6 +1143,15 @@ window.addEventListener("keydown", (e) => {
   const meta = e.ctrlKey || e.metaKey;
   if (meta && (e.key === "z" || e.key === "Z")) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if (meta && (e.key === "y" || e.key === "Y")) { e.preventDefault(); redo(); return; }
+  if (meta && (e.key === "a" || e.key === "A")) {
+    if (!state.assets.length) return;
+    e.preventDefault();   // keep the browser's own select-all off the page text
+    // Hidden layers stay out: they're not on the board, so they can't be
+    // dragged or reviewed — selecting them would only mislead the AI button.
+    state.selection = state.assets.map((a, i) => (a.visible === false ? -1 : i)).filter((i) => i >= 0);
+    renderLayerList(); draw();
+    return;
+  }
   const dir = NUDGE_DIRS[e.key];
   if (dir && !meta && state.selection.length) {
     e.preventDefault();

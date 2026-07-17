@@ -253,23 +253,85 @@ html { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }   /* 
 .asset-el > img { display: block; width: 100%; height: auto; pointer-events: none; -webkit-user-drag: none; }
 .asset-el.selected { outline: 2px solid var(--accent); outline-offset: 0; }
 /* AI double-check suggestion: focused "現在 → 建議" review.
+   Neon HUD look — magenta = current (wrong) spot, mint = suggested target.
    Non-focused suggestions are faint markers; the selected one is highlighted. */
-.sel-suggest { position: absolute; border: 2px dashed var(--success); z-index: 30; pointer-events: none; opacity: .45; }
-.sel-suggest.active { opacity: 1; border-width: 3px; z-index: 41; }
+.sel-suggest {
+  position: absolute; border: 1.5px dashed rgba(53, 240, 176, .5);
+  border-radius: 4px; z-index: 30; pointer-events: none; opacity: .5;
+}
+.sel-suggest.active {
+  opacity: 1; border: 1.5px solid var(--success); z-index: 41;
+  box-shadow: 0 0 14px rgba(53, 240, 176, .4), inset 0 0 18px rgba(53, 240, 176, .12);
+  animation: sug-pulse 2.2s ease-in-out infinite;
+}
+@keyframes sug-pulse {
+  50% { box-shadow: 0 0 26px rgba(53, 240, 176, .6), inset 0 0 26px rgba(53, 240, 176, .2); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sel-suggest.active { animation: none; }
+}
 .sel-suggest.active::after {
-  content: "建議"; position: absolute; left: -1px; top: -16px;
-  font: 600 10px/15px system-ui, sans-serif; background: var(--success); color: #08120c;
-  padding: 0 5px; border-radius: 3px; white-space: nowrap;
+  content: "建議"; position: absolute; left: -1.5px; top: -24px;
+  font: 600 10px/16px system-ui, sans-serif; letter-spacing: 1px;
+  color: var(--success); background: rgba(6, 24, 18, .85);
+  border: 1px solid rgba(53, 240, 176, .6); border-radius: 4px;
+  padding: 1px 6px; white-space: nowrap;
+  box-shadow: 0 0 10px rgba(53, 240, 176, .3);
 }
 .suggest-ghost { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; opacity: .5; border-radius: 4px; }
-/* Current position of the asset under review. */
-.asset-el.suggest-current { outline: 2px dashed #f5a623; outline-offset: 2px; }
-.asset-el.suggest-current::after {
-  content: "現在"; position: absolute; left: -1px; top: -16px;
-  font: 600 10px/15px system-ui, sans-serif; background: #f5a623; color: #1a1205;
-  padding: 0 5px; border-radius: 3px; white-space: nowrap; z-index: 1;
+/* Current position of the asset under review — solid magenta with its own
+   breathing glow, in step with the suggestion box's pulse. */
+.asset-el.suggest-current {
+  outline: 1.5px solid #ff3b8b; outline-offset: 2px;
+  box-shadow: 0 0 14px rgba(255, 59, 139, .4);
+  animation: cur-pulse 2.2s ease-in-out infinite;
 }
-.suggest-arrow { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; z-index: 39; }
+@keyframes cur-pulse {
+  50% { box-shadow: 0 0 26px rgba(255, 59, 139, .65); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .asset-el.suggest-current { animation: none; }
+}
+.asset-el.suggest-current::after {
+  content: "現在"; position: absolute; left: -1.5px; top: -24px;
+  font: 600 10px/16px system-ui, sans-serif; letter-spacing: 1px;
+  color: #ff7cb1; background: rgba(32, 6, 17, .85);
+  border: 1px solid rgba(255, 59, 139, .6); border-radius: 4px;
+  padding: 1px 6px; white-space: nowrap; z-index: 1;
+  box-shadow: 0 0 10px rgba(255, 59, 139, .3);
+}
+/* On-board confirm: ✓ / ✕ pinned to the active suggestion box (same actions
+   as the layer-panel 套用/忽略 buttons — either path resolves the review). */
+.sug-actions {
+  position: absolute; right: -1.5px; top: -34px;
+  display: flex; gap: 6px; pointer-events: auto; z-index: 45;
+}
+.sug-btn {
+  width: 24px; height: 24px; padding: 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font: 700 13px/1 system-ui, sans-serif; cursor: pointer;
+  border: 1px solid;
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  transition: transform .08s ease;
+}
+.sug-btn:hover { transform: translateY(1px); }
+.sug-btn:active { transform: translateY(2px); }
+.sug-btn.ok {
+  background: rgba(6, 30, 22, .7); color: var(--success);
+  border-color: rgba(53, 240, 176, .7);
+  box-shadow: 0 0 10px rgba(53, 240, 176, .35);
+}
+.sug-btn.no {
+  background: rgba(34, 8, 18, .7); color: #ff7cb1;
+  border-color: rgba(255, 59, 139, .7);
+  box-shadow: 0 0 10px rgba(255, 59, 139, .3);
+}
+.board.busy .sug-btn { pointer-events: none; }
+.suggest-arrow {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  overflow: visible; pointer-events: none; z-index: 39;
+  filter: drop-shadow(0 0 4px rgba(53, 240, 176, .45));
+}
 /* Four corner resize handles (single selection). */
 .handle { position: absolute; width: 12px; height: 12px; background: #fff; border: 1.5px solid var(--accent); border-radius: 2px; z-index: 50; }
 .handle.nw { left: -6px; top: -6px; cursor: nwse-resize; }
