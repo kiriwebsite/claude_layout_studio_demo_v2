@@ -52,6 +52,7 @@ const state = {
   layoutW: 0,
   layoutH: 0,
   scale: 1,            // display scale: canvas px = layout px * scale
+  zoom: 1,             // board display zoom factor; 1 = fit the column width
   drag: null,          // { idx, offX, offY }
   selection: [],       // indices of currently-selected assets (DOM editor)
 };
@@ -72,6 +73,76 @@ const controlsBar = document.querySelector(".controls");
 new ResizeObserver(() => {
   document.documentElement.style.setProperty("--controls-h", controlsBar.offsetHeight + "px");
 }).observe(controlsBar);
+
+// ============================================================
+// Board zoom — Ctrl/Cmd +/- and 0, ctrl+wheel, trackpad pinch
+// ============================================================
+// Zoom multiplies the board's fit-to-column width. Display-only: asset coords
+// live in layout px and every pointer conversion derives its ratio from the
+// board's live rect (boardMetrics), so dragging works unchanged at any zoom.
+const canvasWrap = document.querySelector(".canvas-wrap");
+const zoomBadge = el("zoomBadge");
+const MIN_ZOOM = 0.25, MAX_ZOOM = 4, ZOOM_STEP = 1.25;
+
+function applyZoom() {
+  const d = currentDims();
+  if (!d) return;
+  board.style.width = state.zoom * 100 + "%";
+  board.style.maxWidth = d.W * state.zoom + "px";
+}
+
+let zoomBadgeTimer = 0;
+function showZoomBadge() {
+  zoomBadge.textContent = Math.round(state.zoom * 100) + "%";
+  zoomBadge.classList.add("show");
+  clearTimeout(zoomBadgeTimer);
+  zoomBadgeTimer = setTimeout(() => zoomBadge.classList.remove("show"), 1400);
+}
+
+// Re-render the board at zoom `z`, keeping the point under (ax, ay) — client
+// coords — visually fixed. Without an anchor, hold the visible board centre.
+// Horizontal compensation goes to the viewport scroller, vertical to the page
+// (the board scrolls with the document, only its overflow-x is local).
+function setZoom(z, ax, ay) {
+  if (!currentDims() || itx) return;   // no board yet / mid-drag (its k is cached per gesture)
+  z = clamp(z, MIN_ZOOM, MAX_ZOOM);
+  if (ax === undefined) {
+    const vr = viewport.getBoundingClientRect();
+    ax = (Math.max(vr.left, 0) + Math.min(vr.right, innerWidth)) / 2;
+    ay = (Math.max(vr.top, 0) + Math.min(vr.bottom, innerHeight)) / 2;
+  }
+  const r1 = board.getBoundingClientRect();
+  const fx = (ax - r1.left) / r1.width, fy = (ay - r1.top) / r1.height;
+  state.zoom = z;
+  applyZoom();
+  const r2 = board.getBoundingClientRect();
+  viewport.scrollLeft += r2.left + fx * r2.width - ax;
+  window.scrollBy(0, r2.top + fy * r2.height - ay);
+  showZoomBadge();
+}
+
+// ctrl+wheel = zoom at the cursor. Chrome/Edge/Firefox surface trackpad pinch
+// as exactly this event, so one listener covers both. Non-passive on purpose:
+// preventDefault is what keeps the browser's own page zoom off.
+canvasWrap.addEventListener("wheel", (e) => {
+  if (!e.ctrlKey && !e.metaKey) return;
+  if (!currentDims()) return;          // empty board: leave the page zoom alone
+  e.preventDefault();
+  const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;   // Firefox line-mode wheels
+  setZoom(state.zoom * Math.exp(-dy * 0.002), e.clientX, e.clientY);
+}, { passive: false });
+
+// Safari doesn't translate pinch into ctrl+wheel — it fires proprietary
+// gesture events instead. Same handling; e.scale is cumulative per gesture.
+if (typeof GestureEvent !== "undefined") {
+  let pinchStart = 1;
+  canvasWrap.addEventListener("gesturestart", (e) => { e.preventDefault(); pinchStart = state.zoom; });
+  canvasWrap.addEventListener("gesturechange", (e) => {
+    e.preventDefault();
+    if (currentDims()) setZoom(pinchStart * e.scale, e.clientX, e.clientY);
+  });
+  canvasWrap.addEventListener("gestureend", (e) => e.preventDefault());
+}
 
 // ============================================================
 // File loading helpers
@@ -221,9 +292,10 @@ function setupCanvas() {
   const d = currentDims();
   if (!d) { canvas.width = 0; canvas.height = 0; board.style.display = "none"; return; }
   state.scale = 1;
+  state.zoom = 1;   // fresh/reloaded content starts back at fit width
   board.style.display = "";
   board.style.aspectRatio = d.W + " / " + d.H;
-  board.style.maxWidth = d.W + "px";
+  applyZoom();
   if (state.bg) { boardBg.src = state.bg.img.src; boardBg.style.display = ""; }
   else { boardBg.removeAttribute("src"); boardBg.style.display = "none"; }
   if (state.refImg) boardRef.src = state.refImg.src;
@@ -1150,6 +1222,13 @@ window.addEventListener("keydown", (e) => {
     // dragged or reviewed — selecting them would only mislead the AI button.
     state.selection = state.assets.map((a, i) => (a.visible === false ? -1 : i)).filter((i) => i >= 0);
     renderLayerList(); draw();
+    return;
+  }
+  if (meta && (e.key === "=" || e.key === "+" || e.key === "-" || e.key === "0")) {
+    if (!currentDims()) return;   // nothing on the board: let the browser zoom the page
+    e.preventDefault();           // board loaded: these keys zoom the board, not the page
+    if (e.key === "0") setZoom(1);
+    else setZoom(state.zoom * (e.key === "-" ? 1 / ZOOM_STEP : ZOOM_STEP));
     return;
   }
   const dir = NUDGE_DIRS[e.key];

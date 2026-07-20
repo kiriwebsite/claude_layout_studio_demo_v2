@@ -224,6 +224,7 @@ html { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }   /* 
 /* Stage */
 .stage { display: grid; grid-template-columns: 260px 1fr; gap: 14px; align-items: start; }
 .canvas-wrap {
+  min-width: 0;   /* grid item: don't let a zoomed-in board blow the 1fr column out */
   background:
     linear-gradient(45deg, #0d1a2c 25%, transparent 25%) 0 0/24px 24px,
     linear-gradient(-45deg, #0d1a2c 25%, transparent 25%) 0 12px/24px 24px,
@@ -240,7 +241,10 @@ html { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }   /* 
 /* --- DOM visual editor board (replaces the on-screen canvas) ---------------
    The board mirrors the exported HTML/CSS exactly: a % aspect-ratio box with
    absolutely-positioned, %-sized images (height:auto keeps aspect). */
-.viewport { width: 100%; display: flex; justify-content: center; }
+/* Scrolls horizontally when the board is zoomed past the column. Centering is
+   the board's own margin:auto — flex justify-content would clip the left edge
+   of an overflowing board behind an unreachable scroll origin. */
+.viewport { width: 100%; overflow: auto; }
 .board { position: relative; width: 100%; margin: 0 auto; user-select: none; }
 /* While auto-positioning (SSIM / AI) runs, lock the board so manual drags can't
    race the placement. */
@@ -340,6 +344,26 @@ html { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }   /* 
 .handle.se { right: -6px; bottom: -6px; cursor: nwse-resize; }
 /* Alignment guides drawn while dragging. */
 .guide-layer { position: absolute; inset: 0; z-index: 40; pointer-events: none; }
+
+/* Transient zoom readout (Ctrl/Cmd +/-/0, ctrl+wheel). Fixed so it stays put
+   however tall the board gets; sits just below the sticky controls bar. */
+.zoom-badge {
+  position: fixed;
+  top: calc(var(--controls-h, 62px) + 20px);
+  right: 26px;
+  z-index: 100;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: rgba(12, 22, 38, .88);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .15s;
+}
+.zoom-badge.show { opacity: 1; }
 .guide-line { position: absolute; background: #ff3b8b; }
 .guide-line.v { width: 1px; top: 0; bottom: 0; }
 .guide-line.h { height: 1px; left: 0; right: 0; }
