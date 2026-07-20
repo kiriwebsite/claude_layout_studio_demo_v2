@@ -745,7 +745,10 @@ function logAiUsage(model, feature, usage) {
       prompt_tokens: prompt,
       completion_tokens: completion,
       total_tokens: total || prompt + completion,
-      response_metadata: { usage },
+      // Top-level cachedContentTokenCount lets the ledger bill cache hits at the
+      // discounted rate; prompt_tokens stays the full count (discounted centrally).
+      // Don't promote other usageMetadata keys — extras risk double billing there.
+      response_metadata: { usage, cachedContentTokenCount: usage.cachedContentTokenCount || 0 },
     }),
   }).catch((e) => console.warn("AI usage log failed", e));
 }
