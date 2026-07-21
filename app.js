@@ -338,11 +338,15 @@ function renderAssets(d) {
   const W = d.W, H = d.H;
   assetLayer.innerHTML = "";
   const single = state.selection.length === 1 ? state.selection[0] : -1;
+  // The review UI (✓/✕ row, 建議/現在 tags) hangs above its box in fixed
+  // client px, so measure headroom in client px to flip it inside the board.
+  const pxPerUnit = (board.clientWidth || 1) / W;
   state.assets.forEach((a, i) => {
     if (a.visible === false) return;
     const sugFocus = !!a.suggest && i === single;   // the flagged asset being reviewed
     const elDiv = document.createElement("div");
     elDiv.className = "asset-el" + (state.selection.includes(i) ? " selected" : "") + (sugFocus ? " suggest-current" : "");
+    if (sugFocus && a.y * pxPerUnit < 28) elDiv.classList.add("label-flip");   // 現在 tag would poke out the top
     elDiv.dataset.idx = i;
     elDiv.style.left = pct(a.x, W) + "%";
     elDiv.style.top = pct(a.y, H) + "%";
@@ -370,6 +374,11 @@ function renderAssets(d) {
       sg.style.width = pct(a.suggest.w, W) + "%";
       sg.style.height = pct(a.suggest.h, H) + "%";
       if (sugFocus) {
+        // Keep the ✓/✕ row and 建議 tag inside the board: hang below the box
+        // when there's no headroom above; tuck inside when neither edge fits.
+        const topPx = a.suggest.y * pxPerUnit;
+        const botPx = (H - a.suggest.y - a.suggest.h) * pxPerUnit;
+        if (topPx < 40) sg.classList.add(botPx >= 40 ? "flip" : "inside");
         // a semi-transparent copy of the asset so you see WHAT moves there
         const ghost = document.createElement("img");
         ghost.className = "suggest-ghost"; ghost.src = a.img.src; ghost.draggable = false; ghost.alt = "";
@@ -1211,7 +1220,14 @@ window.addEventListener("mouseup", () => {
   if (!itx) return;
   if (itx.mode === "marquee") {
     if (itx.box) itx.box.remove();
-    else if (!itx.shift) clearSelection();   // plain click on empty board
+    else if (!itx.shift) {
+      // Plain click on empty board clears the selection — EXCEPT while an AI
+      // suggestion is under review on the selected asset: a stray click must
+      // not dismiss the 現在/建議 overlay before ✓/✕ (or 套用/忽略) resolves it.
+      const single = state.selection.length === 1 ? state.selection[0] : -1;
+      const reviewing = single >= 0 && state.assets[single] && state.assets[single].suggest;
+      if (!reviewing) clearSelection();
+    }
     itx = null;
     return;   // selection isn't part of the saved session — nothing to persist
   }

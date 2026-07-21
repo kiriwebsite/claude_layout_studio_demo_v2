@@ -318,6 +318,13 @@ html { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }   /* 
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
   transition: transform .08s ease;
 }
+/* Near the top edge the review UI flips below its box — or tucks inside when
+   the box nearly fills the board — so ✓/✕ and the tags never leave the canvas. */
+.sel-suggest.flip .sug-actions { top: auto; bottom: -34px; }
+.sel-suggest.active.flip::after { top: auto; bottom: -24px; }
+.sel-suggest.inside .sug-actions { top: 6px; right: 4.5px; }
+.sel-suggest.active.inside::after { top: 4px; left: 4.5px; }
+.asset-el.suggest-current.label-flip::after { top: auto; bottom: -24px; }
 .sug-btn:hover { transform: translateY(1px); }
 .sug-btn:active { transform: translateY(2px); }
 .sug-btn.ok {
