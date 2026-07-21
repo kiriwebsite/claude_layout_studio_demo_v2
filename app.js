@@ -197,7 +197,18 @@ folderInput.addEventListener("change", () => processAssetFiles(folderInput.files
 filesInput.addEventListener("change", () => processAssetFiles(filesInput.files));
 
 async function processAssetFiles(fileList) {
-  const files = [...fileList].filter((f) => /\.(png|jpe?g|webp|gif|bmp)$/i.test(f.name));
+  // Import order mirrors page structure: header* first, footer* last, the rest
+  // natural-ordered by basename in between (s2 before s10) — FileList order
+  // from folder uploads is filesystem/lexicographic and varies by browser.
+  const basename = (f) => f.name.split("/").pop();
+  const rank = (n) => (/^header/i.test(n) ? 0 : /^footer/i.test(n) ? 2 : 1);
+  const files = [...fileList]
+    .filter((f) => /\.(png|jpe?g|webp|gif|bmp)$/i.test(f.name))
+    .sort((a, b) => {
+      const an = basename(a), bn = basename(b);
+      return rank(an) - rank(bn) ||
+        an.localeCompare(bn, undefined, { numeric: true, sensitivity: "base" });
+    });
   if (!files.length) { folderName.textContent = "找不到圖片檔"; return; }
 
   state.bg = null;
@@ -336,7 +347,9 @@ function renderAssets(d) {
     elDiv.style.left = pct(a.x, W) + "%";
     elDiv.style.top = pct(a.y, H) + "%";
     elDiv.style.width = pct(a.w, W) + "%";
-    elDiv.style.zIndex = sugFocus ? 40 : i + 1;
+    // First in the array (top of the panel) stacks on top; 40 keeps the
+    // reviewed asset above the rest but under the suggest overlay (41/45).
+    elDiv.style.zIndex = sugFocus ? 40 : state.assets.length - i;
     const im = document.createElement("img");
     im.src = a.img.src; im.draggable = false; im.alt = a.name;
     elDiv.appendChild(im);
@@ -1134,11 +1147,52 @@ board.addEventListener("mousedown", (e) => {
       orig: state.selection.map((idx) => ({ i: idx, x: state.assets[idx].x, y: state.assets[idx].y })) };
     e.preventDefault(); return;
   }
-  if (!e.shiftKey) clearSelection();   // click on empty board
+  // Empty board: press starts a marquee selection (Shift keeps and adds to the
+  // current selection). Releasing without dragging keeps the old click
+  // semantics — plain click clears, Shift-click leaves the selection alone.
+  itx = { mode: "marquee", sx: e.clientX, sy: e.clientY, began: false,
+    shift: e.shiftKey, base: e.shiftKey ? [...state.selection] : [] };
+  e.preventDefault();
 });
+
+// Rubber-band selection: any visible asset intersecting the box is selected
+// (Figma-style touch-to-select), live while dragging. The box div sits on the
+// board in % coordinates — the same space the assets use — so it tracks any
+// zoom exactly and survives draw() (which only clears the asset/guide layers).
+function marqueeTo(e) {
+  if (!itx.began) {
+    if (Math.abs(e.clientX - itx.sx) + Math.abs(e.clientY - itx.sy) < 4) return;
+    itx.began = true;
+    itx.box = document.createElement("div");
+    itx.box.className = "marquee";
+    board.appendChild(itx.box);
+  }
+  const { rect, k } = boardMetrics();
+  const W = state.layoutW, H = state.layoutH;
+  // Design-space box, clamped to the layout.
+  const dx1 = clamp(Math.min(itx.sx, e.clientX) - rect.left, 0, rect.width) * k;
+  const dx2 = clamp(Math.max(itx.sx, e.clientX) - rect.left, 0, rect.width) * k;
+  const dy1 = clamp(Math.min(itx.sy, e.clientY) - rect.top, 0, rect.height) * k;
+  const dy2 = clamp(Math.max(itx.sy, e.clientY) - rect.top, 0, rect.height) * k;
+  itx.box.style.left = pct(dx1, W) + "%";
+  itx.box.style.top = pct(dy1, H) + "%";
+  itx.box.style.width = pct(dx2 - dx1, W) + "%";
+  itx.box.style.height = pct(dy2 - dy1, H) + "%";
+  const merged = new Set(itx.base);
+  state.assets.forEach((a, i) => {
+    if (a.visible === false) return;
+    if (a.x < dx2 && a.x + a.w > dx1 && a.y < dy2 && a.y + a.h > dy1) merged.add(i);
+  });
+  const next = [...merged];
+  if (next.length !== state.selection.length || next.some((v, j) => v !== state.selection[j])) {
+    state.selection = next;
+    renderLayerList(); draw();
+  }
+}
 
 window.addEventListener("mousemove", (e) => {
   if (!itx) return;
+  if (itx.mode === "marquee") { marqueeTo(e); return; }   // selection only — no undo snapshot
   if (!itx.began) { beginChange(); itx.began = true; }
   if (itx.mode === "move") {
     const dx = (e.clientX - itx.sx) * itx.k, dy = (e.clientY - itx.sy) * itx.k;
@@ -1155,6 +1209,12 @@ window.addEventListener("mousemove", (e) => {
 
 window.addEventListener("mouseup", () => {
   if (!itx) return;
+  if (itx.mode === "marquee") {
+    if (itx.box) itx.box.remove();
+    else if (!itx.shift) clearSelection();   // plain click on empty board
+    itx = null;
+    return;   // selection isn't part of the saved session — nothing to persist
+  }
   const changed = itx.began;
   itx = null;
   guideLayer.innerHTML = "";
@@ -1258,32 +1318,124 @@ function toggleVisible(idx) {
   saveSession();
 }
 
-// Drag-to-reorder: after a drop the panel's DOM order is the source of truth.
-// The panel shows front-most first, so state.assets is the reverse of DOM order.
-let dragEl = null;
-function commitReorderFromDom() {
-  const visual = [...layerList.querySelectorAll(".layer-item")].map((el) => el._asset).filter(Boolean);
-  if (visual.length !== state.assets.length) return;   // bg row / stale DOM — bail safely
-  const next = visual.slice().reverse();
-  if (next.every((a, k) => a === state.assets[k])) return;   // order unchanged
-  beginChange();
-  state.assets = next;
-  state.selection = [];   // indices shifted on reorder
-  renderLayerList();
-  draw();
-  saveSession();
+// Figma-style drag-to-reorder on pointer events: the grabbed row tracks the
+// pointer 1:1, siblings glide aside (CSS transition), release settles the row
+// into its slot before committing, and the panel auto-scrolls at its edges.
+// HTML5 DnD can't give this feel — its ghost is a delayed snapshot and the
+// old live-insertBefore approach made rows jump around under the cursor.
+// (first in the array = top of the panel = stacked on top, as before.)
+let layerDragClickGuard = false;   // a finished drag swallows the click it fires
+
+function beginLayerDrag(e, li, from) {
+  if (e.button !== 0 || state.busy) return;
+  if (e.target.closest("button")) return;   // eye / suggest buttons keep their clicks
+  const items = [...layerList.querySelectorAll(".layer-item")].filter((n) => !n.classList.contains("bg"));
+  if (items.length < 2) return;
+
+  // Geometry snapshot in offset coordinates — unaffected by panel scroll.
+  const slots = items.map((n) => ({ el: n, top: n.offsetTop, h: n.offsetHeight }));
+  const GAP = 8;                                // .layer-list flex gap
+  const lift = slots[from].h + GAP;             // how far siblings step aside
+  const minY = slots[0].top - slots[from].top;
+  const last = slots[slots.length - 1];
+  const maxY = last.top + last.h - slots[from].h - slots[from].top;
+  const scroller = li.closest(".layers") || layerList;
+  const startPointer = e.clientY, startScroll = scroller.scrollTop;
+  let started = false, to = from, raf = 0, scrollVel = 0, lastY = e.clientY;
+
+  // Capture routes every move/up to the row even outside the panel; without it
+  // (stale pointer, synthetic events) bubbling still reaches us — just degraded.
+  try { li.setPointerCapture(e.pointerId); } catch {}
+
+  const update = () => {
+    // Pointer delta + scroll delta, clamped to the list, drives the grabbed row.
+    const dy = Math.max(minY, Math.min(maxY, (lastY - startPointer) + (scroller.scrollTop - startScroll)));
+    li.style.transform = `translateY(${dy}px)`;
+    // Target slot = where the row's centre sits; siblings shift by one row height.
+    const centre = slots[from].top + dy + slots[from].h / 2;
+    to = from;
+    for (let j = 0; j < slots.length; j++) {
+      if (j === from) continue;
+      const mid = slots[j].top + slots[j].h / 2;
+      if (j < from && centre < mid) to = Math.min(to, j);
+      if (j > from && centre > mid) to = Math.max(to, j);
+    }
+    for (let j = 0; j < slots.length; j++) {
+      if (j === from) continue;
+      const shift = j >= to && j < from ? lift : j <= to && j > from ? -lift : 0;
+      slots[j].el.style.transform = shift ? `translateY(${shift}px)` : "";
+    }
+  };
+
+  const tick = () => {   // edge auto-scroll keeps flowing between pointermoves
+    if (scrollVel) { scroller.scrollTop += scrollVel; update(); }
+    raf = requestAnimationFrame(tick);
+  };
+
+  const onMove = (ev) => {
+    lastY = ev.clientY;
+    if (!started) {
+      if (Math.abs(lastY - startPointer) < 5) return;   // a click until proven a drag
+      started = true;
+      li.classList.add("dragging");
+      document.body.classList.add("layer-dragging");
+      raf = requestAnimationFrame(tick);
+    }
+    const r = scroller.getBoundingClientRect(), EDGE = 28;
+    scrollVel = lastY < r.top + EDGE ? -Math.ceil((r.top + EDGE - lastY) / 4)
+      : lastY > r.bottom - EDGE ? Math.ceil((lastY - (r.bottom - EDGE)) / 4) : 0;
+    update();
+  };
+
+  const finish = (commit) => {
+    li.removeEventListener("pointermove", onMove);
+    li.removeEventListener("pointerup", onUp);
+    li.removeEventListener("pointercancel", onCancel);
+    if (!started) return;                    // plain click — the click handler takes it
+    cancelAnimationFrame(raf);
+    document.body.classList.remove("layer-dragging");
+    layerDragClickGuard = true;
+    if (!commit) to = from;                  // pointercancel: glide back home
+    const settleY = to === from ? 0
+      : to < from ? slots[to].top - slots[from].top
+      : slots[to].top + slots[to].h - slots[from].h - slots[from].top;
+    li.style.transition = "transform .14s ease";
+    li.style.transform = `translateY(${settleY}px)`;
+    setTimeout(() => {                       // after the settle animation
+      layerDragClickGuard = false;
+      if (to !== from) {
+        beginChange();
+        const [moved] = state.assets.splice(from, 1);
+        state.assets.splice(to, 0, moved);
+        state.selection = [to];              // keep the moved layer selected, Figma-style
+        renderLayerList();
+        draw();
+        saveSession();
+      } else {
+        li.classList.remove("dragging");
+        li.style.transition = ""; li.style.transform = "";
+        for (const s of slots) s.el.style.transform = "";
+      }
+    }, 150);
+  };
+  const onUp = () => finish(true);
+  const onCancel = () => finish(false);
+
+  li.addEventListener("pointermove", onMove);
+  li.addEventListener("pointerup", onUp);
+  li.addEventListener("pointercancel", onCancel);
 }
 
 function renderLayerList() {
   layerList.innerHTML = "";
 
-  // Show front-most first (last in array = drawn on top = top of the panel).
-  for (let i = state.assets.length - 1; i >= 0; i--) {
+  // List in array order — import order reads top-to-bottom (header → s1… → footer),
+  // and stacking matches: top of the panel is drawn on top.
+  for (let i = 0; i < state.assets.length; i++) {
     const a = state.assets[i];
     const hidden = a.visible === false;
     const li = document.createElement("li");
     li.className = "layer-item" + (hidden ? " hidden-layer" : "") + (state.selection.includes(i) ? " selected" : "");
-    li._asset = a;                          // drag-reorder reads DOM order back through this
 
     const eye = document.createElement("button");
     eye.className = "eye-btn";
@@ -1325,28 +1477,14 @@ function renderLayerList() {
     }
 
     // Click to select; Shift-click adds/removes from the multi-selection.
-    li.addEventListener("click", (e) => selectAsset(i, e.shiftKey));
+    // The guard eats the click a finished drag fires on release.
+    li.addEventListener("click", (e) => {
+      if (layerDragClickGuard) { layerDragClickGuard = false; return; }
+      selectAsset(i, e.shiftKey);
+    });
 
-    // Drag the whole row to reorder the stacking order (replaces the ▲▼ buttons).
-    li.draggable = true;
-    li.addEventListener("dragstart", (e) => {
-      dragEl = li; li.classList.add("dragging");
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("text/plain", "");   // Firefox won't start a drag without data
-    });
-    li.addEventListener("dragover", (e) => {
-      if (!dragEl || dragEl === li) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-      const r = li.getBoundingClientRect();
-      const after = e.clientY > r.top + r.height / 2;
-      layerList.insertBefore(dragEl, after ? li.nextSibling : li);
-    });
-    li.addEventListener("dragend", () => {
-      li.classList.remove("dragging");
-      dragEl = null;
-      commitReorderFromDom();
-    });
+    // Drag the whole row to reorder the stacking order (see beginLayerDrag).
+    li.addEventListener("pointerdown", (e) => beginLayerDrag(e, li, i));
 
     layerList.appendChild(li);
   }
@@ -1389,13 +1527,13 @@ function buildExport() {
     itemsHTML += `      <img class="${cls}" src="${imgToDataURL(a.img)}" alt="${safeName}" />\n`;
     // Absolute + %: position and width scale fluidly with the container;
     // height:auto (from the rule below) preserves each image's aspect ratio.
-    // z-index follows stacking order so overlapping images keep their layering.
+    // z-index mirrors the board: first in the list stacks on top.
     itemsCSS +=
 `.${cls} {
   left: ${pct(a.x, W)}%;
   top: ${pct(a.y, H)}%;
   width: ${pct(a.w, W)}%;
-  z-index: ${i + 1};
+  z-index: ${state.assets.length - i};
 }
 `;
   });
