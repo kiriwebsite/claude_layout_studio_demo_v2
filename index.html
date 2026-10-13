@@ -25,19 +25,25 @@
       </label>
 
       <label class="upload-card">
-        <span class="upload-title">② 素材資料夾</span>
-        <span class="upload-desc">需包含 bg.png 底圖與要擺放的圖片</span>
-        <input type="file" id="folderInput" webkitdirectory directory multiple />
-        <span class="fallback">Firefox 不支援資料夾?改
-          <label class="link">選多張圖片<input type="file" id="filesInput" accept="image/*" multiple hidden /></label>
-          (記得含 bg.png)
+        <span class="upload-title">② 底圖</span>
+        <span class="upload-desc">定義設計尺寸的背景圖，檔名不限</span>
+        <input type="file" id="bgInput" accept="image/*" />
+        <span class="file-name" id="bgName">未選擇</span>
+      </label>
+
+      <label class="upload-card">
+        <span class="upload-title">③ 素材圖片</span>
+        <span class="upload-desc">可分多次加選、來自不同資料夾；每次選的會加進清單，不會覆蓋</span>
+        <input type="file" id="filesInput" accept="image/*" multiple />
+        <span class="fallback">或
+          <label class="link">加入整個資料夾<input type="file" id="folderInput" webkitdirectory directory multiple hidden /></label>
         </span>
         <span class="file-name" id="folderName">未選擇</span>
       </label>
     </section>
 
     <div class="controls">
-      <span class="step-title">③ 定位</span>
+      <span class="step-title">④ 定位</span>
       <button id="autoPlaceBtn" class="primary-btn small" disabled>SSIM 自動定位</button>
       <label class="check"><input type="checkbox" id="showRefToggle" checked /> 顯示示意圖</label>
       <label class="slider">示意圖透明度

@@ -134,7 +134,8 @@ html { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }   /* 
 .ghost-btn:hover { color: var(--danger); border-color: var(--danger); }
 
 /* Uploads */
-.uploads { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.uploads { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+@media (max-width: 820px) { .uploads { grid-template-columns: 1fr; } }
 .upload-card {
   background: rgba(15, 29, 49, .25);
   backdrop-filter: blur(14px) saturate(1.2);
@@ -153,7 +154,10 @@ html { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }   /* 
 }
 .upload-title { font-weight: 700; font-size: 15px; }
 .upload-desc { color: var(--muted); font-size: 12px; }
-.upload-card input[type=file] { margin-top: 6px; color: var(--muted); font-size: 12px; cursor: pointer; }
+/* font-size 0 hides the native "未選擇任何檔案"/filename text — inputs are
+   cleared after each pick (so re-picks still fire change), and the card's own
+   .file-name line is the single source of truth for what's loaded. */
+.upload-card input[type=file] { margin-top: 6px; color: var(--muted); font-size: 0; cursor: pointer; align-self: flex-start; }
 /* Style the native "選擇檔案" button to match the app buttons + pointer cursor. */
 .upload-card input[type=file]::file-selector-button,
 .upload-card input[type=file]::-webkit-file-upload-button {

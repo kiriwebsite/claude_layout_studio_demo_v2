@@ -2,7 +2,8 @@
 
 /* ============================================================
    Layout Studio
-   - Upload a reference mock-up (示意圖) + an asset folder (含 bg.png)
+   - Upload a reference mock-up (示意圖), a background (底圖, any name)
+     and asset images (added in batches, from any folders)
    - Use SSIM (Structural Similarity) template matching to find
      where each asset belongs inside the reference layout
    - Snap to a CSS grid, let the user drag to fine-tune
@@ -15,7 +16,9 @@ const el = (id) => document.getElementById(id);
 const refInput = el("refInput");
 const folderInput = el("folderInput");
 const filesInput = el("filesInput");
+const bgInput = el("bgInput");
 const refName = el("refName");
+const bgName = el("bgName");
 const folderName = el("folderName");
 const canvas = el("canvas");
 const ctx = canvas.getContext("2d");
@@ -193,53 +196,108 @@ refInput.addEventListener("change", async () => {
   saveSession();
 });
 
-folderInput.addEventListener("change", () => processAssetFiles(folderInput.files));
-filesInput.addEventListener("change", () => processAssetFiles(filesInput.files));
+// Re-picking the same files must still fire "change", so each input is
+// cleared after its files are consumed.
+bgInput.addEventListener("change", async () => {
+  const f = bgInput.files[0];
+  bgInput.value = "";
+  if (f) await setBackground(f);
+});
+folderInput.addEventListener("change", () => { const fl = [...folderInput.files]; folderInput.value = ""; addAssetFiles(fl); });
+filesInput.addEventListener("change", () => { const fl = [...filesInput.files]; filesInput.value = ""; addAssetFiles(fl); });
 
-async function processAssetFiles(fileList) {
-  // Import order mirrors page structure: header* first, footer* last, the rest
-  // natural-ordered by basename in between (s2 before s10) — FileList order
-  // from folder uploads is filesystem/lexicographic and varies by browser.
-  const basename = (f) => f.name.split("/").pop();
-  const rank = (n) => (/^header/i.test(n) ? 0 : /^footer/i.test(n) ? 2 : 1);
-  const files = [...fileList]
-    .filter((f) => /\.(png|jpe?g|webp|gif|bmp)$/i.test(f.name))
-    .sort((a, b) => {
-      const an = basename(a), bn = basename(b);
-      return rank(an) - rank(bn) ||
-        an.localeCompare(bn, undefined, { numeric: true, sensitivity: "base" });
-    });
-  if (!files.length) { folderName.textContent = "找不到圖片檔"; return; }
+const IMG_RE = /\.(png|jpe?g|webp|gif|bmp)$/i;
+const basename = (f) => f.name.split("/").pop();
+// Identity of a picked file, so picking the same file twice doesn't add it
+// twice — while two different files that merely share a name (card.png from
+// two folders) are both kept.
+const fileKey = (f) => `${basename(f)}|${f.size}|${f.lastModified}`;
 
-  state.bg = null;
-  state.assets = [];
+// Import order mirrors page structure: header* first, footer* last, the rest
+// natural-ordered by basename in between (s2 before s10) — FileList order
+// from folder uploads is filesystem/lexicographic and varies by browser.
+const importRank = (n) => (/^header/i.test(n) ? 0 : /^footer/i.test(n) ? 2 : 1);
+const importCmp = (an, bn) => importRank(an) - importRank(bn) ||
+  an.localeCompare(bn, undefined, { numeric: true, sensitivity: "base" });
 
-  for (const f of files) {
-    const base = f.name.split("/").pop();
-    if (/^bg\.(png|jpe?g|webp)$/i.test(base)) {
-      // bg defines the design coordinate space — keep it at full resolution
-      // (cap only enormous backgrounds) so matching ratios and export stay crisp.
-      const { img, blob, nativeW, nativeH } = await normalizeImage(f, 6000);
-      state.bg = { name: base, img, blob, nativeW, nativeH };
-    } else {
-      const { img, blob, nativeW, nativeH } = await normalizeImage(f);
-      state.assets.push({ name: base, img, blob, nativeW, nativeH, x: 0, y: 0, w: nativeW, h: nativeH, score: null, visible: true });
-    }
+// bg defines the design coordinate space — keep it at full resolution (cap
+// only enormous backgrounds) so matching ratios and export stay crisp.
+async function setBackground(f) {
+  const { img, blob, nativeW, nativeH } = await normalizeImage(f, 6000);
+  const prevW = state.layoutW, prevH = state.layoutH;
+  state.bg = { name: basename(f), img, blob, nativeW, nativeH, key: fileKey(f) };
+  state.layoutW = nativeW;
+  state.layoutH = nativeH;
+  bgName.textContent = `${state.bg.name}（${nativeW}×${nativeH}）`;
+  // Asset coords live in the bg's design space. Swapping in a bg of the same
+  // size keeps every placement; a different size (or the first bg, when assets
+  // were picked before it) invalidates them, so re-tile for a usable canvas.
+  if (state.assets.length && (nativeW !== prevW || nativeH !== prevH)) {
+    defaultLayout(state.assets);
+    if (prevW) statusEl.textContent = "底圖尺寸不同，素材已重新排列，請重新定位";
   }
-
-  if (!state.bg) { folderName.textContent = "⚠ 資料夾需包含 bg.png"; return; }
-
-  folderName.textContent = `bg.png + ${state.assets.length} 張素材`;
-  state.layoutW = state.bg.nativeW;
-  state.layoutH = state.bg.nativeH;
-
-  // Default: stack assets in a tidy column so the canvas is usable before SSIM runs.
-  defaultLayout();
+  if (state.assets.length) updateAssetCount(0, 0);   // drops the "尚未選底圖" warning
   setupCanvas();
   renderLayerList();
   draw();
   tryEnableAutoPlace();
   saveSession();
+}
+
+async function addAssetFiles(fileList) {
+  let files = fileList.filter((f) => IMG_RE.test(f.name));
+  if (!files.length) { folderName.textContent = "找不到圖片檔"; return; }
+
+  // Backward compat with the old "folder with bg.png" layout: with no bg yet,
+  // a bg.* in the pick becomes the background; once a bg is set, a bg.* that
+  // is that same file is skipped instead of landing on the board as an asset.
+  const isBgName = (f) => /^bg\.(png|jpe?g|webp)$/i.test(basename(f));
+  if (!state.bg) {
+    const bgFile = files.find(isBgName);
+    if (bgFile) { files = files.filter((f) => f !== bgFile); await setBackground(bgFile); }
+  } else {
+    files = files.filter((f) => !(isBgName(f) && fileKey(f) === state.bg.key));
+  }
+
+  const have = new Set(state.assets.map((a) => a.key).filter(Boolean));
+  const fresh = files.filter((f) => !have.has(fileKey(f)))
+    .sort((a, b) => importCmp(basename(a), basename(b)));
+  const dup = files.length - fresh.length;
+
+  const added = [];
+  for (const f of fresh) {
+    const { img, blob, nativeW, nativeH } = await normalizeImage(f);
+    added.push({ name: basename(f), key: fileKey(f), img, blob, nativeW, nativeH,
+      x: 0, y: 0, w: nativeW, h: nativeH, score: null, visible: true });
+  }
+
+  if (added.length) {
+    if (state.assets.length) beginChange();   // undo removes the whole batch
+    // Slot each new asset in by import order (a forgotten s3 lands between
+    // s2 and s4) without disturbing any manual reordering of existing layers.
+    for (const a of added) {
+      const j = state.assets.findIndex((b) => importCmp(b.name, a.name) > 0);
+      if (j < 0) state.assets.push(a); else state.assets.splice(j, 0, a);
+    }
+    state.selection = [];
+    // Only the newcomers get staged; placed assets stay where they are.
+    if (state.bg) defaultLayout(added);
+  }
+
+  updateAssetCount(added.length, dup);
+  renderLayerList();
+  draw();
+  tryEnableAutoPlace();
+  saveSession();
+}
+
+function updateAssetCount(added, dup) {
+  const n = state.assets.length;
+  let t = n ? `共 ${n} 張素材` : "未選擇";
+  if (added) t += `（新增 ${added}）`;
+  if (dup) t += `，略過 ${dup} 張重複`;
+  if (n && !state.bg) t += "　⚠ 尚未選底圖";
+  folderName.textContent = t;
 }
 
 function tryEnableAutoPlace() {
@@ -261,12 +319,12 @@ function updateAiButtons() {
   aiFixBtn.disabled = !(ready && state.selection.length) || reviewing;
 }
 
-function defaultLayout() {
+function defaultLayout(list) {
   // Tile in rows, wrapping inside the board width; a single column runs off
   // the bottom as soon as the assets outgrow the design height.
   const M = 16;
   let x = M, y = M, rowH = 0;
-  for (const a of state.assets) {
+  for (const a of list) {
     const maxW = state.layoutW * 0.4;
     const s = a.nativeW > maxW ? maxW / a.nativeW : 1;
     a.w = a.nativeW * s;
@@ -280,7 +338,7 @@ function defaultLayout() {
   const usedH = y + rowH + M;
   if (usedH > state.layoutH) {
     const k = state.layoutH / usedH;
-    for (const a of state.assets) { a.x *= k; a.y *= k; a.w *= k; a.h *= k; }
+    for (const a of list) { a.x *= k; a.y *= k; a.w *= k; a.h *= k; }
   }
 }
 
@@ -342,7 +400,9 @@ function renderAssets(d) {
   // client px, so measure headroom in client px to flip it inside the board.
   const pxPerUnit = (board.clientWidth || 1) / W;
   state.assets.forEach((a, i) => {
-    if (a.visible === false) return;
+    // Without a bg there is no design space yet — assets picked first wait in
+    // the layer list and get staged once the bg arrives.
+    if (a.visible === false || !state.bg) return;
     const sugFocus = !!a.suggest && i === single;   // the flagged asset being reviewed
     const elDiv = document.createElement("div");
     elDiv.className = "asset-el" + (state.selection.includes(i) ? " selected" : "") + (sugFocus ? " suggest-current" : "");
@@ -1759,14 +1819,14 @@ function saveSession() {
 }
 
 async function doSave() {
-  if (!state.bg && !state.refBlob) return;
+  if (!state.bg && !state.refBlob && !state.assets.length) return;
   try {
     const record = {
       refBlob: state.refBlob || null,
       refNameTxt: refName.textContent,
-      bg: state.bg ? { name: state.bg.name, blob: state.bg.blob, nativeW: state.bg.nativeW, nativeH: state.bg.nativeH } : null,
+      bg: state.bg ? { name: state.bg.name, key: state.bg.key, blob: state.bg.blob, nativeW: state.bg.nativeW, nativeH: state.bg.nativeH } : null,
       assets: state.assets.map((a) => ({
-        name: a.name, blob: a.blob, nativeW: a.nativeW, nativeH: a.nativeH,
+        name: a.name, key: a.key, blob: a.blob, nativeW: a.nativeW, nativeH: a.nativeH,
         x: a.x, y: a.y, w: a.w, h: a.h, score: a.score, visible: a.visible !== false,
       })),
       layoutW: state.layoutW,
@@ -1794,7 +1854,7 @@ async function restoreSession() {
     }
     if (record.bg) {
       const img = await loadImage(URL.createObjectURL(record.bg.blob));
-      state.bg = { name: record.bg.name, img, blob: record.bg.blob,
+      state.bg = { name: record.bg.name, key: record.bg.key, img, blob: record.bg.blob,
         nativeW: record.bg.nativeW || img.width, nativeH: record.bg.nativeH || img.height };
     }
     state.assets = [];
@@ -1804,14 +1864,15 @@ async function restoreSession() {
       // Keep aspect ratio: height always derives from width (fixes any legacy
       // distorted saves from the old grid-cell snapping).
       const w = a.w, h = w * (nativeH / nativeW);
-      state.assets.push({ name: a.name, img, blob: a.blob, nativeW, nativeH,
+      state.assets.push({ name: a.name, key: a.key, img, blob: a.blob, nativeW, nativeH,
         x: a.x, y: a.y, w, h, score: a.score, visible: a.visible !== false });
     }
     state.layoutW = record.layoutW;
     state.layoutH = record.layoutH;
 
-    if (state.bg) {
-      folderName.textContent = `bg.png + ${state.assets.length} 張素材（已還原）`;
+    if (state.bg) bgName.textContent = `${state.bg.name}（${state.bg.nativeW}×${state.bg.nativeH}）`;
+    if (state.assets.length) {
+      folderName.textContent = `共 ${state.assets.length} 張素材（已還原）`;
       renderLayerList();
     }
     if (state.refImg && record.refNameTxt) refName.textContent = record.refNameTxt;
@@ -1834,8 +1895,9 @@ resetBtn.addEventListener("click", async () => {
   state.layoutW = 0; state.layoutH = 0; state.drag = null;
   state.selection = []; undoStack.length = 0; redoStack.length = 0;
 
-  refInput.value = ""; folderInput.value = ""; filesInput.value = "";
+  refInput.value = ""; bgInput.value = ""; folderInput.value = ""; filesInput.value = "";
   refName.textContent = "未選擇";
+  bgName.textContent = "未選擇";
   folderName.textContent = "未選擇";
   statusEl.textContent = "";
   layerList.innerHTML = "";
