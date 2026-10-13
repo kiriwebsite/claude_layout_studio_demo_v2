@@ -81,11 +81,17 @@
         </div>
         <span id="zoomBadge" class="zoom-badge">100%</span>
       </div>
+      <aside class="layers inspector">
+        <h3>屬性</h3>
+        <div id="inspectorBody" class="insp-body"></div>
+      </aside>
     </div>
 
     <div class="actionbar">
       <span class="foot-hint">可在畫布上拖曳微調位置，確認後再下載</span>
       <span id="saveStatus" class="save-status"></span>
+      <button id="undoBtn" class="ghost-btn undo-btn" disabled>↶ 復原</button>
+      <button id="redoBtn" class="ghost-btn undo-btn" disabled>↷ 重做</button>
       <button id="resetBtn" class="ghost-btn" title="清空示意圖、素材與畫布，並刪除自動存檔">↺ 重新開始</button>
       <button id="downloadBtn" class="success-btn" disabled>⬇ 下載切版 (HTML / CSS / JS)</button>
     </div>

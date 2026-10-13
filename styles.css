@@ -132,6 +132,10 @@ html { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }   /* 
   padding: 8px 12px; cursor: pointer; font-size: 13px;
 }
 .ghost-btn:hover { color: var(--danger); border-color: var(--danger); }
+.undo-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.undo-btn:active:not(:disabled) { transform: translateY(1px); }
+.undo-btn:disabled { opacity: .4; cursor: not-allowed; }
+.undo-btn:disabled:hover { color: var(--muted); border-color: var(--line); }
 
 /* Uploads */
 .uploads { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
@@ -226,7 +230,11 @@ html { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }   /* 
 }
 
 /* Stage */
-.stage { display: grid; grid-template-columns: 260px 1fr; gap: 14px; align-items: start; }
+.stage { display: grid; grid-template-columns: 260px 1fr 240px; gap: 14px; align-items: start; }
+@media (max-width: 1100px) {
+  .stage { grid-template-columns: 220px 1fr; }
+  .stage .inspector { grid-column: 1 / -1; position: static; max-height: none; }
+}
 .canvas-wrap {
   min-width: 0;   /* grid item: don't let a zoomed-in board blow the 1fr column out */
   background:
@@ -249,7 +257,10 @@ html { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }   /* 
    the board's own margin:auto — flex justify-content would clip the left edge
    of an overflowing board behind an unreachable scroll origin. */
 .viewport { width: 100%; overflow: auto; }
-.board { position: relative; width: 100%; margin: 0 auto; user-select: none; }
+.board { position: relative; width: 100%; margin: 0 auto; user-select: none;
+  /* cqw = 1% of the board width: flex-group members and gaps size in it,
+     exactly like the exported .layout. */
+  container-type: inline-size; }
 /* While auto-positioning (SSIM / AI) runs, lock the board so manual drags can't
    race the placement. */
 .board.busy { cursor: progress; }
@@ -260,6 +271,16 @@ html { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }   /* 
 .asset-el { position: absolute; height: auto; cursor: move; }
 .asset-el > img { display: block; width: 100%; height: auto; pointer-events: none; -webkit-user-drag: none; }
 .asset-el.selected { outline: 2px solid var(--accent); outline-offset: 0; }
+/* Flex group box: a dashed frame so the reflow area is visible; members are
+   in-flow flex items inside it (relative so their handles still anchor). */
+.group-el { position: absolute; display: flex; outline: 1px dashed rgba(255, 196, 0, .55); outline-offset: 0; cursor: move; }
+.group-el.selected { outline: 2px solid #ffc400; }
+.group-el > .asset-el { position: relative; flex: none; }
+.wrap-tag {
+  position: absolute; top: 2px; right: 2px; pointer-events: none;
+  background: rgba(2, 21, 32, .82); color: var(--accent); border: 1px solid var(--accent);
+  border-radius: 4px; font-size: 10px; line-height: 1; padding: 2px 4px; font-weight: 700;
+}
 /* AI double-check suggestion: focused "現在 → 建議" review.
    Neon HUD look — magenta = current (wrong) spot, mint = suggested target.
    Non-focused suggestions are faint markers; the selected one is highlighted. */
@@ -459,3 +480,38 @@ body.layer-dragging .layer-item:hover:not(.dragging) { border-color: var(--line)
 }
 .mini-btn:hover { color: var(--success); border-color: var(--success); }
 .mini-btn.dismiss:hover { color: var(--danger); border-color: var(--danger); }
+
+/* Group rows in the layer panel */
+.layer-group {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #ffc400; padding: 2px 4px; cursor: pointer; user-select: none;
+  border-radius: 6px; border: 1px solid transparent;
+}
+.layer-group:hover { border-color: rgba(255, 196, 0, .4); }
+.layer-group.selected { border-color: #ffc400; background: rgba(255, 196, 0, .08); }
+.layer-group .nm { flex: 1; font-weight: 700; }
+.layer-group .gdir { color: var(--muted); font-size: 11px; }
+.layer-item.in-group { margin-left: 12px; border-left: 2px solid rgba(255, 196, 0, .6); }
+.wrap-badge {
+  color: var(--accent); border: 1px solid var(--accent); border-radius: 4px;
+  font-size: 10px; padding: 1px 4px; white-space: nowrap; font-family: ui-monospace, monospace;
+}
+
+/* Inspector */
+.insp-body { display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
+.insp-title { font-weight: 700; font-size: 13px; overflow-wrap: anywhere; }
+.insp-title span { color: var(--muted); font-weight: 400; margin-left: 6px; font-size: 11px; }
+.insp-hint { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.insp-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.insp-row > span { color: var(--muted); white-space: nowrap; }
+.insp-row select, .insp-row input[type=text], .insp-row input[type=number] {
+  min-width: 0; flex: 1; max-width: 140px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 4px 6px; font-size: 12px;
+}
+.insp-row input[type=text] { max-width: none; }
+.insp-row select:focus, .insp-row input:focus { outline: none; border-color: var(--accent); }
+.insp-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.insp-btn { font-size: 11px; padding: 4px 8px; }
+.insp-btn:active:not(:disabled) { transform: translateY(1px); }
+.insp-btn:disabled { opacity: .45; cursor: not-allowed; }

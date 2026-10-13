@@ -28,6 +28,8 @@ const autoPlaceBtn = el("autoPlaceBtn");
 const downloadBtn = el("downloadBtn");
 const saveStatus = el("saveStatus");
 const resetBtn = el("resetBtn");
+const undoBtn = el("undoBtn");
+const redoBtn = el("redoBtn");
 const showRefToggle = el("showRefToggle");
 const refOpacitySlider = el("refOpacity");
 const refOpacityVal = el("refOpacityVal");
@@ -35,6 +37,7 @@ const geminiKeyInput = el("geminiKey");
 const geminiModelSelect = el("geminiModel");
 const aiFixBtn = el("aiFixBtn");
 const aiCheckBtn = el("aiCheckBtn");
+const inspectorBody = el("inspectorBody");
 // DOM editor board (display layer). The canvas above is kept only for SSIM/Gemini.
 const viewport = el("viewport");
 const board = el("board");
@@ -58,6 +61,11 @@ const state = {
   zoom: 1,             // board display zoom factor; 1 = fit the column width
   drag: null,          // { idx, offX, offY }
   selection: [],       // indices of currently-selected assets (DOM editor)
+  // Flex groups: [{ id, x, y, w, h, dir, wrap, justify, align, gap }] — the box is
+  // in layout space; members (a.group === id) sit contiguously in state.assets,
+  // and that order is their flex order. a.wrap = { tag: "a"|"button", href, blank }.
+  groups: [],
+  nextGroupId: 1,
 };
 
 // ============================================================
@@ -233,6 +241,8 @@ async function setBackground(f) {
   // size keeps every placement; a different size (or the first bg, when assets
   // were picked before it) invalidates them, so re-tile for a usable canvas.
   if (state.assets.length && (nativeW !== prevW || nativeH !== prevH)) {
+    for (const a of state.assets) a.group = null;   // group boxes were in the old space
+    state.groups = [];
     defaultLayout(state.assets);
     if (prevW) statusEl.textContent = "底圖尺寸不同，素材已重新排列，請重新定位";
   }
@@ -268,17 +278,18 @@ async function addAssetFiles(fileList) {
   for (const f of fresh) {
     const { img, blob, nativeW, nativeH } = await normalizeImage(f);
     added.push({ name: basename(f), key: fileKey(f), img, blob, nativeW, nativeH,
-      x: 0, y: 0, w: nativeW, h: nativeH, score: null, visible: true });
+      x: 0, y: 0, w: nativeW, h: nativeH, score: null, visible: true, group: null, wrap: null });
   }
 
   if (added.length) {
-    if (state.assets.length) beginChange();   // undo removes the whole batch
+    beginChange();   // undo removes the whole batch (the first one too)
     // Slot each new asset in by import order (a forgotten s3 lands between
     // s2 and s4) without disturbing any manual reordering of existing layers.
     for (const a of added) {
       const j = state.assets.findIndex((b) => importCmp(b.name, a.name) > 0);
       if (j < 0) state.assets.push(a); else state.assets.splice(j, 0, a);
     }
+    normalizeGroups();   // a newcomer sorted into a group's run is moved out of it
     state.selection = [];
     // Only the newcomers get staged; placed assets stay where they are.
     if (state.bg) defaultLayout(added);
@@ -387,6 +398,7 @@ function draw(guides) {
   }
 
   renderAssets(d);
+  syncGroupMembers();
   renderGuides(guides);
 }
 
@@ -399,24 +411,44 @@ function renderAssets(d) {
   // The review UI (✓/✕ row, 建議/現在 tags) hangs above its box in fixed
   // client px, so measure headroom in client px to flip it inside the board.
   const pxPerUnit = (board.clientWidth || 1) / W;
+  const selG = selectedGroup();
+  const gEls = renderGroupBoxes(W, H, selG);
   state.assets.forEach((a, i) => {
     // Without a bg there is no design space yet — assets picked first wait in
     // the layer list and get staged once the bg arrives.
     if (a.visible === false || !state.bg) return;
     const sugFocus = !!a.suggest && i === single;   // the flagged asset being reviewed
     const elDiv = document.createElement("div");
-    elDiv.className = "asset-el" + (state.selection.includes(i) ? " selected" : "") + (sugFocus ? " suggest-current" : "");
+    // A selected group outlines its box, not every member inside it.
+    const sel = state.selection.includes(i) && !(selG && a.group === selG.id);
+    elDiv.className = "asset-el" + (sel ? " selected" : "") + (sugFocus ? " suggest-current" : "");
     if (sugFocus && a.y * pxPerUnit < 28) elDiv.classList.add("label-flip");   // 現在 tag would poke out the top
     elDiv.dataset.idx = i;
-    elDiv.style.left = pct(a.x, W) + "%";
-    elDiv.style.top = pct(a.y, H) + "%";
-    elDiv.style.width = pct(a.w, W) + "%";
-    // First in the array (top of the panel) stacks on top; 40 keeps the
-    // reviewed asset above the rest but under the suggest overlay (41/45).
-    elDiv.style.zIndex = sugFocus ? 40 : state.assets.length - i;
+    const gEl = a.group != null ? gEls.get(a.group) : null;
+    if (gEl) {
+      // Flex item: the group places it, so only its width is ours — in cqw
+      // (1% of the board width, the same unit the export uses) so it matches
+      // the standalone % width exactly.
+      elDiv.style.width = pct(a.w, W) + "cqw";
+      if (sugFocus) elDiv.style.zIndex = 40;
+    } else {
+      elDiv.style.left = pct(a.x, W) + "%";
+      elDiv.style.top = pct(a.y, H) + "%";
+      elDiv.style.width = pct(a.w, W) + "%";
+      // First in the array (top of the panel) stacks on top; 40 keeps the
+      // reviewed asset above the rest but under the suggest overlay (41/45).
+      elDiv.style.zIndex = sugFocus ? 40 : state.assets.length - i;
+    }
     const im = document.createElement("img");
     im.src = a.img.src; im.draggable = false; im.alt = a.name;
     elDiv.appendChild(im);
+    if (a.wrap) {
+      const tg = document.createElement("span");
+      tg.className = "wrap-tag";
+      tg.textContent = a.wrap.tag === "a" ? "🔗" : "BTN";
+      tg.title = a.wrap.tag === "a" ? `<a href="${a.wrap.href || "#"}">` : "<button>";
+      elDiv.appendChild(tg);
+    }
     if (i === single) {
       for (const c of ["nw", "ne", "sw", "se"]) {
         const hd = document.createElement("div");
@@ -424,7 +456,7 @@ function renderAssets(d) {
         elDiv.appendChild(hd);
       }
     }
-    assetLayer.appendChild(elDiv);
+    (gEl || assetLayer).appendChild(elDiv);
 
     if (a.suggest) {
       const sg = document.createElement("div");
@@ -487,6 +519,62 @@ function renderAssets(d) {
       `<circle cx="${x1}" cy="${y1}" r="${s * 1.3}" fill="#ff3b8b"/>` +
       `<circle cx="${x2}" cy="${y2}" r="${s * 1.6}" fill="none" stroke="#35f0b0" stroke-width="${s * .6}"/>`;
     assetLayer.appendChild(svg);
+  }
+}
+
+// One flex container per group with a visible member — same declarations the
+// export writes, so the board previews the exported reflow exactly. Members are
+// appended into these by renderAssets (array order = flex order).
+function renderGroupBoxes(W, H, selG) {
+  const gEls = new Map();
+  for (const g of state.groups) {
+    const first = state.assets.findIndex((a) => a.group === g.id && a.visible !== false);
+    if (first < 0) continue;
+    const gd = document.createElement("div");
+    gd.className = "group-el" + (selG === g ? " selected" : "");
+    gd.dataset.gid = g.id;
+    gd.style.left = pct(g.x, W) + "%";
+    gd.style.top = pct(g.y, H) + "%";
+    gd.style.width = pct(g.w, W) + "%";
+    gd.style.height = pct(g.h, H) + "%";
+    Object.assign(gd.style, groupFlexStyle(g, W));
+    gd.style.zIndex = state.assets.length - first;
+    if (selG === g) {
+      for (const c of ["nw", "ne", "sw", "se"]) {
+        const hd = document.createElement("div");
+        hd.className = "handle " + c; hd.dataset.corner = c; hd.dataset.gid = g.id;
+        gd.appendChild(hd);
+      }
+    }
+    assetLayer.appendChild(gd);
+    gEls.set(g.id, gd);
+  }
+  return gEls;
+}
+
+function groupFlexStyle(g, W) {
+  return {
+    flexDirection: g.dir, flexWrap: g.wrap ? "wrap" : "nowrap",
+    justifyContent: g.justify, alignItems: g.align,
+    // Wrapped lines pack to the start (not stretched apart over the box height).
+    alignContent: "flex-start",
+    gap: pct(g.gap, W) + "cqw",
+  };
+}
+
+// Flex decides where members land; copy the rendered spots back into a.x/a.y so
+// everything that reads asset geometry (snapping, marquee, SSIM refine, the AI
+// layout snapshot, the suggest arrow) keeps working on grouped assets unchanged.
+function syncGroupMembers() {
+  if (!state.groups.length) return;
+  const br = board.getBoundingClientRect();
+  if (!br.width) return;
+  const k = state.layoutW / br.width;
+  for (const n of assetLayer.querySelectorAll(".group-el > .asset-el")) {
+    const a = state.assets[+n.dataset.idx];
+    const r = n.getBoundingClientRect();
+    a.x = (r.left - br.left) * k;
+    a.y = (r.top - br.top) * k;
   }
 }
 
@@ -733,6 +821,9 @@ autoPlaceBtn.addEventListener("click", async () => {
       await new Promise((r) => setTimeout(r, 0));   // yield so the UI stays alive
       pyramidMatchAsset(state.assets[i], pctx, bands[i]);
     }
+    // Flex owns member positions, so move each group's box to where SSIM found
+    // its members (sizes kept; the flex settings decide the spacing inside).
+    for (const g of state.groups) fitGroup(g);
 
     statusEl.textContent = "✓ 定位完成，可拖曳微調";
     downloadBtn.disabled = false;
@@ -1085,9 +1176,12 @@ function applySuggest(idx) {
   const a = state.assets[idx];
   if (!a || !a.suggest) return;
   beginChange();
+  const ox = a.x, oy = a.y;
   a.x = a.suggest.x; a.y = a.suggest.y; a.w = a.suggest.w; a.h = a.suggest.h;
   a.suggest = null;
   localRefine(a);   // SSIM snap the position within a small window (size kept)
+  const g = groupOf(a);
+  if (g) { g.x += a.x - ox; g.y += a.y - oy; }   // flex places members: shift the whole group instead
   renderLayerList(); draw(); saveSession();
   focusNextSuggest();
 }
@@ -1125,38 +1219,181 @@ function clearSelection() {
   renderLayerList(); draw();
 }
 
-// Undo/redo. A snapshot keeps each asset's object reference plus its geometry
-// and visibility, so deletes and reorders are fully reversible.
+// ---- Groups ----
+const groupById = (id) => (id == null ? null : state.groups.find((g) => g.id === id) || null);
+const groupOf = (a) => (a ? groupById(a.group) : null);
+const memberIdx = (g) => state.assets.map((a, i) => (a.group === g.id ? i : -1)).filter((i) => i >= 0);
+const groupLabel = (g) => "群組 " + (state.groups.indexOf(g) + 1);
+
+// The group counts as selected when the selection is exactly its visible
+// members (2+). Derived, not stored, so every path that sets state.selection
+// (marquee, Ctrl+A, undo…) stays consistent without extra bookkeeping. A single
+// selected member is member-level (link/button settings, own resize).
+function selectedGroup() {
+  const sel = state.selection;
+  if (sel.length < 2) return null;
+  const g = groupOf(state.assets[sel[0]]);
+  if (!g) return null;
+  const vis = memberIdx(g).filter((i) => state.assets[i].visible !== false);
+  return vis.length === sel.length && vis.every((i) => sel.includes(i)) ? g : null;
+}
+// Touching any member selects its whole group (Figma-style).
+function expandToGroups(indices) {
+  const out = new Set(indices);
+  for (const i of indices) {
+    const g = groupOf(state.assets[i]);
+    if (g) for (const j of memberIdx(g)) if (state.assets[j].visible !== false) out.add(j);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+// Groups touched by the selection — moving any member moves its group.
+function selectionGroups() {
+  const set = new Set();
+  for (const i of state.selection) { const g = groupOf(state.assets[i]); if (g) set.add(g); }
+  return [...set];
+}
+
+// Keep the invariants: every group has 2+ members (fewer → dissolved, the
+// survivor keeps its spot) and members are contiguous in the array, pulled
+// together at the first member's slot.
+function normalizeGroups() {
+  for (const g of [...state.groups]) {
+    const idx = memberIdx(g);
+    if (idx.length < 2) {
+      for (const i of idx) state.assets[i].group = null;
+      state.groups.splice(state.groups.indexOf(g), 1);
+      continue;
+    }
+    if (idx[idx.length - 1] - idx[0] === idx.length - 1) continue;
+    const members = idx.map((i) => state.assets[i]);
+    const rest = state.assets.filter((a) => a.group !== g.id);
+    const at = rest.indexOf(state.assets[idx[0] - 1]) + 1;   // after the item preceding the first member
+    rest.splice(at, 0, ...members);
+    state.assets = rest;
+  }
+}
+
+function groupSelection() {
+  const idx = [...state.selection].filter((i) => state.assets[i] && state.assets[i].visible !== false);
+  if (idx.length < 2) return;
+  if (idx.some((i) => state.assets[i].group != null)) {
+    statusEl.textContent = "⚠ 已在群組裡的素材不能再建群組（不支援巢狀），請先解散";
+    return;
+  }
+  beginChange();
+  const members = idx.map((i) => state.assets[i]);
+  const minX = Math.min(...members.map((a) => a.x)), minY = Math.min(...members.map((a) => a.y));
+  const maxX = Math.max(...members.map((a) => a.x + a.w)), maxY = Math.max(...members.map((a) => a.y + a.h));
+  // Infer flex settings from where the pieces already sit, so grouping barely
+  // moves anything: main axis = the direction their centres spread along,
+  // gap = average spacing, cross alignment = whichever edge/centre lines up best.
+  const cx = members.map((a) => a.x + a.w / 2), cy = members.map((a) => a.y + a.h / 2);
+  const row = Math.max(...cx) - Math.min(...cx) >= Math.max(...cy) - Math.min(...cy);
+  const [p, sz, q, qs] = row ? ["x", "w", "y", "h"] : ["y", "h", "x", "w"];
+  members.sort((a, b) => a[p] - b[p]);
+  let gaps = 0;
+  for (let j = 1; j < members.length; j++) gaps += members[j][p] - (members[j - 1][p] + members[j - 1][sz]);
+  const gap = Math.max(0, Math.round(gaps / (members.length - 1) * 10) / 10);   // 0.1px: rounding to whole px nudged members
+  const spread = (f) => { const v = members.map(f); return Math.max(...v) - Math.min(...v); };
+  const align = [
+    ["flex-start", spread((a) => a[q])],
+    ["center", spread((a) => a[q] + a[qs] / 2)],
+    ["flex-end", spread((a) => a[q] + a[qs])],
+  ].sort((a, b) => a[1] - b[1])[0][0];
+  const g = { id: state.nextGroupId++, x: minX, y: minY, w: maxX - minX, h: maxY - minY,
+    dir: row ? "row" : "column", wrap: false, justify: "flex-start", align, gap };
+  state.groups.push(g);
+  // Members go contiguous at the topmost member's slot, in visual (flex) order.
+  const at = Math.min(...idx);
+  const rest = state.assets.filter((a) => !members.includes(a));
+  const before = state.assets.slice(0, at).filter((a) => !members.includes(a)).length;
+  for (const a of members) a.group = g.id;
+  rest.splice(before, 0, ...members);
+  state.assets = rest;
+  state.selection = members.map((a) => state.assets.indexOf(a));
+  statusEl.textContent = `已建立${groupLabel(g)}（${row ? "水平" : "垂直"}排列），可在右側屬性調整`;
+  renderLayerList(); draw(); saveSession();
+}
+
+// Dissolve: members keep exactly where flex put them (a.x/a.y are synced).
+function ungroup(g) {
+  if (!g) return;
+  beginChange();
+  for (const i of memberIdx(g)) state.assets[i].group = null;
+  state.groups.splice(state.groups.indexOf(g), 1);
+  renderLayerList(); draw(); saveSession();
+}
+
+// Reset the box to its members' bounding box (after SSIM moved them, or to
+// shrink-wrap after editing flex settings).
+function fitGroup(g) {
+  const ms = memberIdx(g).map((i) => state.assets[i]).filter((a) => a.visible !== false);
+  if (!ms.length) return;
+  const minX = Math.min(...ms.map((a) => a.x)), minY = Math.min(...ms.map((a) => a.y));
+  g.w = Math.max(...ms.map((a) => a.x + a.w)) - minX;
+  g.h = Math.max(...ms.map((a) => a.y + a.h)) - minY;
+  g.x = minX; g.y = minY;
+}
+
+// Undo/redo. A snapshot keeps each asset's object reference plus its geometry,
+// visibility, group and wrap — and copies of the groups — so deletes, reorders,
+// grouping and every inspector edit are fully reversible.
 const undoStack = [], redoStack = [];
 function snapAssets() {
-  return state.assets.map((a) => ({ a, x: a.x, y: a.y, w: a.w, h: a.h, visible: a.visible !== false }));
+  return {
+    assets: state.assets.map((a) => ({ a, x: a.x, y: a.y, w: a.w, h: a.h, visible: a.visible !== false,
+      group: a.group != null ? a.group : null, wrap: a.wrap ? { ...a.wrap } : null })),
+    groups: state.groups.map((g) => ({ ...g })),
+  };
 }
-function restoreAssets(entry) {
-  state.assets = entry.map((e) => { e.a.x = e.x; e.a.y = e.y; e.a.w = e.w; e.a.h = e.h; e.a.visible = e.visible; return e.a; });
+function restoreAssets(snap) {
+  state.assets = snap.assets.map((e) => {
+    e.a.x = e.x; e.a.y = e.y; e.a.w = e.w; e.a.h = e.h; e.a.visible = e.visible;
+    e.a.group = e.group; e.a.wrap = e.wrap ? { ...e.wrap } : null;
+    return e.a;
+  });
+  state.groups = snap.groups.map((g) => ({ ...g }));   // copies: the snapshot may be restored again
 }
 function beginChange() {
   undoStack.push(snapAssets());
   if (undoStack.length > 120) undoStack.shift();
   redoStack.length = 0;
+  updateUndoButtons();
 }
 function undo() {
-  if (!undoStack.length) return;
+  if (!undoStack.length || state.busy || itx) return;   // not mid-SSIM/AI pass or mid-drag
   redoStack.push(snapAssets());
   restoreAssets(undoStack.pop());
-  state.selection = [];
-  renderLayerList(); draw(); saveSession();
+  afterHistoryStep();
 }
 function redo() {
-  if (!redoStack.length) return;
+  if (!redoStack.length || state.busy || itx) return;
   undoStack.push(snapAssets());
   restoreAssets(redoStack.pop());
-  state.selection = [];
-  renderLayerList(); draw(); saveSession();
+  afterHistoryStep();
 }
+function afterHistoryStep() {
+  state.selection = [];
+  updateAssetCount(0, 0);   // an import may have been undone/redone
+  renderLayerList(); draw(); saveSession();
+  tryEnableAutoPlace();
+  updateUndoButtons();
+}
+const MOD_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+";
+function updateUndoButtons() {
+  undoBtn.disabled = !undoStack.length;
+  redoBtn.disabled = !redoStack.length;
+  undoBtn.title = `復原上一步（${MOD_KEY}Z）`;
+  redoBtn.title = `重做（${MOD_KEY}Shift+Z / ${MOD_KEY}Y）`;
+}
+undoBtn.addEventListener("click", undo);
+redoBtn.addEventListener("click", redo);
+updateUndoButtons();
 function deleteSelected() {
   if (!state.selection.length) return;
   beginChange();
   for (const i of [...state.selection].sort((a, b) => b - a)) state.assets.splice(i, 1);
+  normalizeGroups();   // a group left with one member dissolves
   state.selection = [];
   renderLayerList(); draw(); saveSession();
 }
@@ -1178,8 +1415,13 @@ function nudgeSelection(dx, dy) {
   const W = state.layoutW, H = state.layoutH;
   for (const idx of state.selection) {
     const a = state.assets[idx];
+    if (a.group != null) continue;   // grouped members move with their group
     a.x = clamp(a.x + dx, 0, W - a.w);
     a.y = clamp(a.y + dy, 0, H - a.h);
+  }
+  for (const g of selectionGroups()) {
+    g.x = clamp(g.x + dx, 0, Math.max(0, W - g.w));
+    g.y = clamp(g.y + dy, 0, Math.max(0, H - g.h));
   }
   renderLayerList(); draw();
 }
@@ -1200,20 +1442,39 @@ board.addEventListener("mousedown", (e) => {
   if (!state.bg || state.busy) return;
   const handle = e.target.closest(".handle");
   const elDiv = e.target.closest(".asset-el");
+  const gDiv = e.target.closest(".group-el");
   const { k } = boardMetrics();
 
+  if (handle && handle.dataset.gid) {
+    const g = groupById(+handle.dataset.gid);
+    if (!g) return;
+    itx = { mode: "gresize", g, corner: handle.dataset.corner, k, began: false,
+      orig: { x: g.x, y: g.y, right: g.x + g.w, bottom: g.y + g.h } };
+    e.preventDefault(); return;
+  }
   if (handle && state.selection.length === 1) {
     const i = state.selection[0], a = state.assets[i];
     itx = { mode: "resize", corner: handle.dataset.corner, k, began: false,
       orig: { x: a.x, y: a.y, w: a.w, h: a.h, right: a.x + a.w, bottom: a.y + a.h, aspect: a.nativeH / a.nativeW } };
     e.preventDefault(); return;
   }
-  if (elDiv) {
-    const i = +elDiv.dataset.idx;
-    if (e.shiftKey) { selectAsset(i, true); e.preventDefault(); return; }
-    if (!state.selection.includes(i)) { state.selection = [i]; renderLayerList(); draw(); }
+  if (elDiv || gDiv) {
+    // A click on a member (or the group box between members) takes the whole
+    // group; double-click drills into the one member under the pointer.
+    const i = elDiv ? +elDiv.dataset.idx : memberIdx(groupById(+gDiv.dataset.gid))[0];
+    const grouped = state.assets[i].group != null;
+    if (e.shiftKey) {
+      const ids = expandToGroups([i]);
+      const all = ids.every((j) => state.selection.includes(j));
+      state.selection = all ? state.selection.filter((j) => !ids.includes(j))
+        : [...new Set([...state.selection, ...ids])];
+      renderLayerList(); draw(); e.preventDefault(); return;
+    }
+    if (elDiv && grouped && e.detail >= 2) { state.selection = [i]; renderLayerList(); draw(); }
+    else if (!state.selection.includes(i)) { state.selection = expandToGroups([i]); renderLayerList(); draw(); }
     itx = { mode: "move", k, sx: e.clientX, sy: e.clientY, began: false,
-      orig: state.selection.map((idx) => ({ i: idx, x: state.assets[idx].x, y: state.assets[idx].y })) };
+      orig: state.selection.map((idx) => ({ i: idx, x: state.assets[idx].x, y: state.assets[idx].y })),
+      gorig: selectionGroups().map((g) => ({ g, x: g.x, y: g.y })) };
     e.preventDefault(); return;
   }
   // Empty board: press starts a marquee selection (Shift keeps and adds to the
@@ -1252,7 +1513,7 @@ function marqueeTo(e) {
     if (a.visible === false) return;
     if (a.x < dx2 && a.x + a.w > dx1 && a.y < dy2 && a.y + a.h > dy1) merged.add(i);
   });
-  const next = [...merged];
+  const next = expandToGroups([...merged]);
   if (next.length !== state.selection.length || next.some((v, j) => v !== state.selection[j])) {
     state.selection = next;
     renderLayerList(); draw();
@@ -1266,10 +1527,16 @@ window.addEventListener("mousemove", (e) => {
   if (itx.mode === "move") {
     const dx = (e.clientX - itx.sx) * itx.k, dy = (e.clientY - itx.sy) * itx.k;
     itx.orig.forEach((o) => { const a = state.assets[o.i]; a.x = o.x + dx; a.y = o.y + dy; });
+    itx.gorig.forEach((o) => { o.g.x = o.x + dx; o.g.y = o.y + dy; });
     const guides = snapSelection();
     const W = state.layoutW, H = state.layoutH;
     for (const idx of state.selection) { const a = state.assets[idx]; a.x = clamp(a.x, 0, W - a.w); a.y = clamp(a.y, 0, H - a.h); }
-    draw(guides);
+    for (const { g } of itx.gorig) { g.x = clamp(g.x, 0, Math.max(0, W - g.w)); g.y = clamp(g.y, 0, Math.max(0, H - g.h)); }
+    draw(guides);   // members re-sync from the flex layout here
+  } else if (itx.mode === "gresize") {
+    groupResizeTo(e);
+    draw();
+    renderInspector();   // live W/H readout
   } else {
     resizeTo(e);
     draw();
@@ -1302,12 +1569,14 @@ window.addEventListener("mouseup", () => {
 function snapSelection() {
   const W = state.layoutW, H = state.layoutH, thr = 6 * itx.k;
   const sel = new Set(state.selection);
+  const gs = itx.gorig ? itx.gorig.map((o) => o.g) : [];
+  const moving = new Set(gs.map((g) => g.id));   // members of a dragged group travel with it
   let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
   for (const idx of state.selection) { const a = state.assets[idx]; minX = Math.min(minX, a.x); minY = Math.min(minY, a.y); maxX = Math.max(maxX, a.x + a.w); maxY = Math.max(maxY, a.y + a.h); }
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
   const targX = [0, W / 2, W], targY = [0, H / 2, H];
   state.assets.forEach((a, idx) => {
-    if (sel.has(idx) || a.visible === false) return;
+    if (sel.has(idx) || a.visible === false || moving.has(a.group)) return;
     targX.push(a.x, a.x + a.w / 2, a.x + a.w);
     targY.push(a.y, a.y + a.h / 2, a.y + a.h);
   });
@@ -1318,9 +1587,22 @@ function snapSelection() {
   };
   const bx = best([minX, cx, maxX], targX), by = best([minY, cy, maxY], targY);
   const guides = [];
-  if (bx) { for (const idx of state.selection) state.assets[idx].x += bx.off; guides.push({ type: "v", pos: bx.pos }); }
-  if (by) { for (const idx of state.selection) state.assets[idx].y += by.off; guides.push({ type: "h", pos: by.pos }); }
+  if (bx) { for (const idx of state.selection) state.assets[idx].x += bx.off; for (const g of gs) g.x += bx.off; guides.push({ type: "v", pos: bx.pos }); }
+  if (by) { for (const idx of state.selection) state.assets[idx].y += by.off; for (const g of gs) g.y += by.off; guides.push({ type: "h", pos: by.pos }); }
   return guides;
+}
+
+// Free (non-proportional) resize of a group's box — members keep their sizes,
+// flex just re-flows them inside. The opposite corner stays anchored.
+function groupResizeTo(e) {
+  const { rect, k } = boardMetrics();
+  const W = state.layoutW, H = state.layoutH, MIN = 8;
+  const px = clamp((e.clientX - rect.left) * k, 0, W), py = clamp((e.clientY - rect.top) * k, 0, H);
+  const o = itx.orig, c = itx.corner, g = itx.g;
+  if (c === "ne" || c === "se") { g.x = o.x; g.w = Math.max(MIN, px - o.x); }
+  else { g.x = Math.min(px, o.right - MIN); g.w = o.right - g.x; }
+  if (c === "sw" || c === "se") { g.y = o.y; g.h = Math.max(MIN, py - o.y); }
+  else { g.y = Math.min(py, o.bottom - MIN); g.h = o.bottom - g.y; }
 }
 
 // Four-corner proportional resize (height derives from width to keep aspect,
@@ -1349,11 +1631,24 @@ const NUDGE_DIRS = {
   ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
 };
 window.addEventListener("keydown", (e) => {
-  const tag = (document.activeElement && document.activeElement.tagName) || "";
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  const ae = document.activeElement;
+  const tag = (ae && ae.tagName) || "";
+  // Text-entry fields keep every key (their own text undo included). Other form
+  // controls — the inspector's selects/checkboxes keep focus after a change —
+  // still get app undo/redo, but nothing else (arrows belong to the select).
+  const typing = tag === "TEXTAREA" || (ae && ae.isContentEditable) ||
+    (tag === "INPUT" && /^(text|number|password|search|url|email)$/i.test(ae.type));
+  if (typing) return;
   const meta = e.ctrlKey || e.metaKey;
   if (meta && (e.key === "z" || e.key === "Z")) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if (meta && (e.key === "y" || e.key === "Y")) { e.preventDefault(); redo(); return; }
+  if (tag === "INPUT" || tag === "SELECT") return;
+  if (meta && (e.key === "g" || e.key === "G")) {
+    e.preventDefault();   // keep the browser's find-next off
+    if (e.shiftKey) ungroup(selectedGroup() || groupOf(state.assets[state.selection[0]]));
+    else groupSelection();
+    return;
+  }
   if (meta && (e.key === "a" || e.key === "A")) {
     if (!state.assets.length) return;
     e.preventDefault();   // keep the browser's own select-all off the page text
@@ -1483,7 +1778,13 @@ function beginLayerDrag(e, li, from) {
         beginChange();
         const [moved] = state.assets.splice(from, 1);
         state.assets.splice(to, 0, moved);
-        state.selection = [to];              // keep the moved layer selected, Figma-style
+        // Dropped between two members of a group → joins it; a member dropped
+        // away from its group → leaves it (keeping its on-board spot).
+        const nb = (j) => (state.assets[j] ? state.assets[j].group : undefined);
+        if (moved.group != null && nb(to - 1) !== moved.group && nb(to + 1) !== moved.group) moved.group = null;
+        else if (moved.group == null && nb(to - 1) != null && nb(to - 1) === nb(to + 1)) moved.group = nb(to - 1);
+        normalizeGroups();
+        state.selection = [state.assets.indexOf(moved)];   // keep the moved layer selected, Figma-style
         renderLayerList();
         draw();
         saveSession();
@@ -1502,16 +1803,22 @@ function beginLayerDrag(e, li, from) {
   li.addEventListener("pointercancel", onCancel);
 }
 
-function renderLayerList() {
+// keepInspector: an inspector control is mid-edit — rebuilding the panel would
+// steal its focus, so only the layer rows refresh.
+function renderLayerList(keepInspector) {
   layerList.innerHTML = "";
 
   // List in array order — import order reads top-to-bottom (header → s1… → footer),
   // and stacking matches: top of the panel is drawn on top.
+  const selG = selectedGroup();
   for (let i = 0; i < state.assets.length; i++) {
     const a = state.assets[i];
+    const g = groupOf(a);
+    if (g && (i === 0 || state.assets[i - 1].group !== g.id)) layerList.appendChild(groupHeaderRow(g, selG === g));
     const hidden = a.visible === false;
     const li = document.createElement("li");
-    li.className = "layer-item" + (hidden ? " hidden-layer" : "") + (state.selection.includes(i) ? " selected" : "");
+    li.className = "layer-item" + (hidden ? " hidden-layer" : "") + (g ? " in-group" : "") +
+      (state.selection.includes(i) && selG !== g ? " selected" : "");
 
     const eye = document.createElement("button");
     eye.className = "eye-btn";
@@ -1529,6 +1836,11 @@ function renderLayerList() {
     nm.textContent = a.name;
 
     li.append(eye, thumb, nm);
+    if (a.wrap) {
+      const wt = document.createElement("span");
+      wt.className = "wrap-badge"; wt.textContent = a.wrap.tag === "a" ? "<a>" : "<button>";
+      li.appendChild(wt);
+    }
     if (a.suggest) {
       // Double-check flagged this asset. The apply/dismiss controls live on
       // their own full-width row below (.suggest-row) so they wrap downward
@@ -1573,6 +1885,165 @@ function renderLayerList() {
   }
 
   updateAiButtons();   // "AI 選取定位" is gated on the current selection
+  if (!keepInspector) renderInspector();
+}
+
+// Header row above a group's members. Deliberately NOT a .layer-item, so the
+// drag-to-reorder slots (indexed by asset) are untouched; clicking selects
+// the whole group.
+const DIR_LABEL = { row: "水平 →", "row-reverse": "水平 ←", column: "垂直 ↓", "column-reverse": "垂直 ↑" };
+function groupHeaderRow(g, selected) {
+  const li = document.createElement("li");
+  li.className = "layer-group" + (selected ? " selected" : "");
+  li.innerHTML = `<span class="gicon">▣</span><span class="nm"></span><span class="gdir"></span>`;
+  li.querySelector(".nm").textContent = groupLabel(g);
+  li.querySelector(".gdir").textContent = "flex " + DIR_LABEL[g.dir];
+  li.addEventListener("click", () => {
+    state.selection = memberIdx(g).filter((i) => state.assets[i].visible !== false);
+    renderLayerList(); draw();
+  });
+  return li;
+}
+
+// ============================================================
+// Inspector: group flex settings / link-or-button wrap for the selection
+// ============================================================
+const DIR_OPTS = [["row", "水平 row →"], ["row-reverse", "水平反向 row-reverse ←"],
+  ["column", "垂直 column ↓"], ["column-reverse", "垂直反向 column-reverse ↑"]];
+const JUSTIFY_OPTS = [["flex-start", "靠起點 flex-start"], ["center", "置中 center"], ["flex-end", "靠終點 flex-end"],
+  ["space-between", "兩端貼齊 space-between"], ["space-around", "環繞 space-around"], ["space-evenly", "平均 space-evenly"]];
+// No "stretch": it would stretch a bare <img> flex item and distort it.
+const ALIGN_OPTS = [["flex-start", "靠起點 flex-start"], ["center", "置中 center"], ["flex-end", "靠終點 flex-end"]];
+const WRAP_OPTS = [["", "無（純圖片）"], ["a", "連結 <a>"], ["button", "按鈕 <button>"]];
+
+// One undo step per discrete edit (select, checkbox, button, committed text).
+function commitEdit(fn, rebuild) {
+  beginChange();
+  fn();
+  draw(); renderLayerList(!rebuild); saveSession();
+}
+
+function inspHint(text) {
+  const p = document.createElement("p");
+  p.className = "insp-hint"; p.textContent = text;
+  inspectorBody.appendChild(p);
+}
+function inspTitle(text, sub) {
+  const h = document.createElement("div");
+  h.className = "insp-title"; h.textContent = text;
+  if (sub) { const s2 = document.createElement("span"); s2.textContent = sub; h.appendChild(s2); }
+  inspectorBody.appendChild(h);
+}
+function inspRow(label, control) {
+  const row = document.createElement("label");
+  row.className = "insp-row";
+  const sp = document.createElement("span"); sp.textContent = label;
+  row.append(sp, control);
+  inspectorBody.appendChild(row);
+  return control;
+}
+function inspSelect(opts, value, onPick) {
+  const sel = document.createElement("select");
+  for (const [v, t] of opts) { const o = document.createElement("option"); o.value = v; o.textContent = t; sel.appendChild(o); }
+  sel.value = value;
+  sel.addEventListener("change", () => onPick(sel.value));
+  return sel;
+}
+function inspCheck(checked, onToggle) {
+  const c = document.createElement("input");
+  c.type = "checkbox"; c.checked = checked;
+  c.addEventListener("change", () => onToggle(c.checked));
+  return c;
+}
+// Number field that previews live while typing/spinning; the whole run of
+// edits is ONE undo step (opened on the first input, closed on change/blur).
+function inspNumber(value, min, onValue) {
+  const n = document.createElement("input");
+  n.type = "number"; n.min = min; n.step = 1; n.value = Math.round(value * 10) / 10;
+  let run = false;
+  n.addEventListener("input", () => {
+    const v = parseFloat(n.value);
+    if (!isFinite(v) || v < min) return;
+    if (!run) { beginChange(); run = true; }
+    onValue(v);
+    draw(); renderLayerList(true); saveSession();
+  });
+  n.addEventListener("change", () => { run = false; });
+  return n;
+}
+function inspButtons(...defs) {
+  const row = document.createElement("div");
+  row.className = "insp-actions";
+  for (const [text, fn, opts = {}] of defs) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "mini-btn insp-btn" + (opts.cls ? " " + opts.cls : "");
+    b.textContent = text; b.disabled = !!opts.disabled;
+    if (opts.title) b.title = opts.title;
+    b.addEventListener("click", fn);
+    row.appendChild(b);
+  }
+  inspectorBody.appendChild(row);
+}
+
+function renderInspector() {
+  inspectorBody.innerHTML = "";
+  if (!state.bg || !state.assets.length) { inspHint("選好底圖與素材後，點選畫布上的素材即可在這裡設定。"); return; }
+  const g = selectedGroup();
+  if (g) return inspectGroup(g);
+  if (state.selection.length === 1) return inspectAsset(state.assets[state.selection[0]]);
+  if (state.selection.length > 1) return inspectMulti();
+  inspHint("點選素材設定連結／按鈕；Shift 或框選多張後可「建立群組」（⌘/Ctrl+G），用 flexbox 排列。");
+}
+
+function inspectGroup(g) {
+  inspTitle(groupLabel(g), `${memberIdx(g).length} 張`);
+  inspRow("方向", inspSelect(DIR_OPTS, g.dir, (v) => commitEdit(() => { g.dir = v; }, true)));
+  inspRow("主軸對齊", inspSelect(JUSTIFY_OPTS, g.justify, (v) => commitEdit(() => { g.justify = v; })));
+  inspRow("交叉軸對齊", inspSelect(ALIGN_OPTS, g.align, (v) => commitEdit(() => { g.align = v; })));
+  inspRow("自動換行", inspCheck(g.wrap, (v) => commitEdit(() => { g.wrap = v; })));
+  inspRow("間距 gap (px)", inspNumber(g.gap, 0, (v) => { g.gap = v; }));
+  inspRow("寬 (px)", inspNumber(g.w, 8, (v) => { g.w = v; }));
+  inspRow("高 (px)", inspNumber(g.h, 8, (v) => { g.h = v; }));
+  inspButtons(
+    ["貼合內容", () => commitEdit(() => fitGroup(g), true), { title: "把群組框縮到剛好包住成員" }],
+    ["解散群組", () => ungroup(g), { cls: "dismiss", title: "⌘/Ctrl+Shift+G；成員留在目前位置" }],
+  );
+  inspHint("拖曳群組框四角可調整範圍；雙擊成員可單獨選取（設定連結、縮放大小）；在左側圖層拖曳可調順序或拖出群組。");
+}
+
+function inspectAsset(a) {
+  inspTitle(a.name);
+  const g = groupOf(a);
+  if (g) {
+    inspButtons([`屬於${groupLabel(g)} · 選取群組`, () => {
+      state.selection = memberIdx(g).filter((i) => state.assets[i].visible !== false);
+      renderLayerList(); draw();
+    }]);
+  }
+  const kind = a.wrap ? a.wrap.tag : "";
+  inspRow("包成", inspSelect(WRAP_OPTS, kind, (v) => commitEdit(() => {
+    a.wrap = v === "a" ? { tag: "a", href: (a.wrap && a.wrap.href) || "", blank: !!(a.wrap && a.wrap.blank) }
+      : v === "button" ? { tag: "button" } : null;
+  }, true)));
+  if (kind === "a") {
+    const url = document.createElement("input");
+    url.type = "text"; url.placeholder = "https://… 或 #anchor"; url.value = a.wrap.href || "";
+    url.addEventListener("change", () => commitEdit(() => { a.wrap.href = url.value.trim(); }));
+    inspRow("網址 href", url);
+    inspRow("新分頁開啟", inspCheck(!!a.wrap.blank, (v) => commitEdit(() => { a.wrap.blank = v; })));
+  } else if (kind === "button") {
+    inspHint('匯出為 <button type="button">，可在 script.js 用 .item-N 綁定點擊事件。');
+  }
+  if (kind) inspHint("圖片在連結／按鈕裡維持 width:100%、height:auto，比例不變形。");
+}
+
+function inspectMulti() {
+  const n = state.selection.length;
+  inspTitle(`已選 ${n} 張`);
+  const nested = state.selection.some((i) => state.assets[i].group != null);
+  inspButtons(["建立群組 ⌘G", groupSelection, { disabled: nested,
+    title: nested ? "選取中有素材已在群組裡（不支援巢狀）" : "依目前位置自動推測方向、間距與對齊" }]);
+  if (nested) inspHint("選取中有素材已在群組裡，不支援巢狀群組；請先解散該群組。");
 }
 
 // ============================================================
@@ -1594,17 +2065,34 @@ function buildExport() {
   const bgURL = imgToDataURL(state.bg.img);
   const W = state.layoutW, H = state.layoutH;
 
+  const esc = (v) => String(v).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // One piece of markup: a bare <img>, or the image wrapped in <a>/<button>.
+  // The class (and so the position/width) sits on the outer element; a wrapped
+  // image is width:100% + height:auto inside it, so it never distorts.
+  const node = (a, cls, ind) => {
+    const img = (c) => `<img${c ? ` class="${c}"` : ""} src="${imgToDataURL(a.img)}" alt="${esc(a.name)}" />`;
+    if (!a.wrap) return `${ind}${img(cls)}\n`;
+    if (a.wrap.tag === "a") {
+      const tgt = a.wrap.blank ? ' target="_blank" rel="noopener"' : "";
+      return `${ind}<a class="${cls}" href="${esc(a.wrap.href || "#")}"${tgt}>${img("")}</a>\n`;
+    }
+    return `${ind}<button class="${cls}" type="button">${img("")}</button>\n`;
+  };
+
   let itemsHTML = "";
   let itemsCSS = "";
+  const done = new Set();
+  let gn = 0;
   state.assets.forEach((a, i) => {
     if (a.visible === false) return;   // hidden layers are excluded from export
     const cls = `item-${i + 1}`;
-    const safeName = a.name.replace(/"/g, "");
-    itemsHTML += `      <img class="${cls}" src="${imgToDataURL(a.img)}" alt="${safeName}" />\n`;
-    // Absolute + %: position and width scale fluidly with the container;
-    // height:auto (from the rule below) preserves each image's aspect ratio.
-    // z-index mirrors the board: first in the list stacks on top.
-    itemsCSS +=
+    const g = groupOf(a);
+    if (!g) {
+      itemsHTML += node(a, `item ${cls}`, "      ");
+      // Absolute + %: position and width scale fluidly with the container;
+      // height:auto (from the rules below) preserves each image's aspect ratio.
+      // z-index mirrors the board: first in the list stacks on top.
+      itemsCSS +=
 `.${cls} {
   left: ${pct(a.x, W)}%;
   top: ${pct(a.y, H)}%;
@@ -1612,6 +2100,36 @@ function buildExport() {
   z-index: ${state.assets.length - i};
 }
 `;
+      return;
+    }
+    if (done.has(g.id)) return;   // emitted with its first visible member
+    done.add(g.id);
+    const gcls = `group-${++gn}`;
+    const f = groupFlexStyle(g, W);
+    itemsHTML += `      <div class="group ${gcls}">\n`;
+    itemsCSS +=
+`.${gcls} {
+  left: ${pct(g.x, W)}%;
+  top: ${pct(g.y, H)}%;
+  width: ${pct(g.w, W)}%;
+  height: ${pct(g.h, H)}%;
+  flex-direction: ${f.flexDirection};
+  flex-wrap: ${f.flexWrap};
+  justify-content: ${f.justifyContent};
+  align-items: ${f.alignItems};
+  align-content: ${f.alignContent};
+  gap: ${f.gap};
+  z-index: ${state.assets.length - i};
+}
+`;
+    // Members in array order = flex order; widths in cqw (1% of .layout's
+    // width) so they match the standalone % sizing while flex places them.
+    state.assets.forEach((m, j) => {
+      if (m.group !== g.id || m.visible === false) return;
+      itemsHTML += node(m, `item item-${j + 1}`, "        ");
+      itemsCSS += `.item-${j + 1} { width: ${pct(m.w, W)}cqw; }\n`;
+    });
+    itemsHTML += `      </div>\n`;
   });
 
   const css =
@@ -1627,14 +2145,35 @@ function buildExport() {
   background-image: url("${bgURL}");
   background-size: cover;
   background-position: center;
+  /* Lets flex-group members and gaps size in cqw (1% of this box's width). */
+  container-type: inline-size;
 }
 
 /* Every piece is absolutely positioned by % and keeps its own aspect ratio,
    so the whole layout scales fluidly (RWD) and images never distort. */
-.layout img {
+.layout .item {
   position: absolute;
-  height: auto;
   display: block;
+}
+.layout img { display: block; height: auto; }
+/* Linked / button pieces: the wrapper carries position + width, the image
+   just fills its width — height:auto keeps the aspect ratio. */
+.layout .item img { width: 100%; }
+.layout button.item {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+/* Flex groups: the box is placed like an item; flex lays out the members. */
+.layout .group {
+  position: absolute;
+  display: flex;
+}
+.layout .group > .item {
+  position: static;
+  flex: none;
 }
 
 ${itemsCSS}`;
@@ -1667,7 +2206,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("keydown", (e) => {
     if (e.key.toLowerCase() !== "g") return;
     outline = !outline;
-    layout.querySelectorAll("img").forEach((el) => {
+    layout.querySelectorAll(".item, .group").forEach((el) => {
       el.style.outline = outline ? "1px solid rgba(91,140,255,.8)" : "none";
     });
   });
@@ -1828,7 +2367,9 @@ async function doSave() {
       assets: state.assets.map((a) => ({
         name: a.name, key: a.key, blob: a.blob, nativeW: a.nativeW, nativeH: a.nativeH,
         x: a.x, y: a.y, w: a.w, h: a.h, score: a.score, visible: a.visible !== false,
+        group: a.group != null ? a.group : null, wrap: a.wrap || null,
       })),
+      groups: state.groups,
       layoutW: state.layoutW,
       layoutH: state.layoutH,
     };
@@ -1865,8 +2406,12 @@ async function restoreSession() {
       // distorted saves from the old grid-cell snapping).
       const w = a.w, h = w * (nativeH / nativeW);
       state.assets.push({ name: a.name, key: a.key, img, blob: a.blob, nativeW, nativeH,
-        x: a.x, y: a.y, w, h, score: a.score, visible: a.visible !== false });
+        x: a.x, y: a.y, w, h, score: a.score, visible: a.visible !== false,
+        group: a.group != null ? a.group : null, wrap: a.wrap || null });
     }
+    state.groups = (record.groups || []).map((g) => ({ ...g }));
+    state.nextGroupId = state.groups.reduce((m, g) => Math.max(m, g.id + 1), 1);
+    normalizeGroups();
     state.layoutW = record.layoutW;
     state.layoutH = record.layoutH;
 
@@ -1891,9 +2436,10 @@ resetBtn.addEventListener("click", async () => {
   if (!confirm("確定要清空目前所有內容並重新開始嗎？(會一併刪除自動存檔)")) return;
 
   state.refImg = null; state.refBlob = null;
-  state.bg = null; state.assets = [];
+  state.bg = null; state.assets = []; state.groups = [];
   state.layoutW = 0; state.layoutH = 0; state.drag = null;
   state.selection = []; undoStack.length = 0; redoStack.length = 0;
+  updateUndoButtons();
 
   refInput.value = ""; bgInput.value = ""; folderInput.value = ""; filesInput.value = "";
   refName.textContent = "未選擇";
